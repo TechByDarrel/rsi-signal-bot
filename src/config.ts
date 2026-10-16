@@ -1,0 +1,9 @@
+export const PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+export const INTERVAL = "1m";
+export const CANDLE_LIMIT = 100;
+export const RSI_PERIOD = 14;
+export const RSI_OVERSOLD = 30;
+export const RSI_OVERBOUGHT = 70;
+export const EXPIRY_MINUTES = 1;
+export const POLL_SECONDS = 60;
+export const LOG_FILE = "logs/signals.csv";
