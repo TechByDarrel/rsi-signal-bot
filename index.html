@@ -12,24 +12,46 @@
     <script>
       (() => {
         let pendingError = "";
-        const showError = (message) => {
+        const sourceFromStack = (stack) =>
+          stack?.match(/(?:https?:\/\/|file:\/\/\/|\/)[^\s)]+:\d+:\d+/)?.[0];
+        const showError = (message, source = "") => {
           const fallback = document.getElementById("startup-error");
           const detail = document.getElementById("startup-error-detail");
           if (!fallback || !detail) {
-            pendingError = message;
+            pendingError = [message, source && `Source: ${source}`]
+              .filter(Boolean)
+              .join("\n");
             return;
           }
-          detail.textContent = ` ${message}`;
+          detail.textContent = [message, source && `Source: ${source}`]
+            .filter(Boolean)
+            .join("\n");
           fallback.hidden = false;
         };
 
         document.addEventListener("DOMContentLoaded", () => {
-          if (pendingError) showError(pendingError);
+          if (pendingError) {
+            const detail = document.getElementById("startup-error-detail");
+            if (detail) detail.textContent = pendingError;
+            const fallback = document.getElementById("startup-error");
+            if (fallback) fallback.hidden = false;
+          }
         });
         window.addEventListener(
           "error",
           (event) => {
-            showError(event.message || "The dashboard failed to start.");
+            const target = event.target;
+            const source =
+              event.filename ||
+              sourceFromStack(event.error?.stack) ||
+              (target instanceof HTMLScriptElement ? target.src : "") ||
+              (target instanceof HTMLLinkElement ? target.href : "");
+            const message =
+              event.message ||
+              (target instanceof HTMLScriptElement
+                ? "The application script failed to load."
+                : "The dashboard failed to start.");
+            showError(message, source);
           },
           true,
         );
@@ -39,6 +61,7 @@
             reason instanceof Error
               ? reason.message
               : String(reason || "The dashboard failed to start."),
+            reason instanceof Error ? sourceFromStack(reason.stack) || "" : "",
           );
         });
       })();
@@ -50,10 +73,10 @@
       id="startup-error"
       role="alert"
       hidden
-      style="margin: 2rem auto; max-width: 48rem; padding: 1rem 1.25rem; border: 1px solid #ef4444; border-radius: .75rem; color: #fecaca; background: #271416; font: 500 1rem/1.5 system-ui, sans-serif;"
+      style="margin: 2rem auto; max-width: 48rem; padding: 1rem 1.25rem; border: 1px solid #ef4444; border-radius: .75rem; color: #fecaca; background: #271416; font: 500 1rem/1.5 system-ui, sans-serif; overflow-wrap: anywhere;"
     >
       <strong>The dashboard could not start.</strong>
-      <span id="startup-error-detail"></span>
+      <div id="startup-error-detail" style="margin-top: .5rem; white-space: pre-wrap;"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

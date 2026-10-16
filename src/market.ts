@@ -75,7 +75,15 @@ async function requestJson<T>(url: string): Promise<T> {
       continue;
     }
 
-    const response = await fetch(url);
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      const cause = error instanceof Error ? `: ${error.message}` : "";
+      throw new Error(
+        `Could not reach Binance market data (network error${cause}). Your network or region may block this.`,
+      );
+    }
     if (response.status === 429 || response.status === 418) {
       const delay = retryDelay(response);
       rateLimitUntil = Date.now() + delay;
@@ -86,7 +94,7 @@ async function requestJson<T>(url: string): Promise<T> {
     }
     if (!response.ok) {
       throw new Error(
-        `Binance request failed: HTTP ${response.status} ${response.statusText}`,
+        `Could not reach Binance market data (HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}). Your network or region may block this.`,
       );
     }
     return (await response.json()) as T;
