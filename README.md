@@ -1,6 +1,6 @@
 # RSI Signal Bot
 
-A browser-based dashboard that scans Binance spot markets quoted in USDT, ranks pairs by their 24-hour high-low range, and displays RSI-based CALL/PUT signals with a simplified historical backtest. It is for market analysis and alerting only: it does not connect to Pocket Option, any broker, or place trades or orders.
+A browser-based dashboard that scans Binance spot markets quoted in USDT, ranks pairs by their 24-hour high-low range, and displays plain-language Bullish (CALL) and Bearish (PUT) RSI signals with a simplified historical backtest. It is for market analysis and alerting only: it does not connect to Pocket Option, any broker, or place trades or orders.
 
 ## Local development
 
@@ -20,7 +20,7 @@ npm test
 npm run build
 ```
 
-Vitest covers RSI, ATR, the break-even payout calculation, and the timeframe recommendation rule.
+Vitest covers RSI, ATR, the break-even payout calculation, the timeframe recommendation rule, and plain-language RSI signal labels.
 
 ## How to use the dashboard
 
@@ -29,7 +29,10 @@ Vitest covers RSI, ATR, the break-even payout calculation, and the timeframe rec
 - The optional EMA(50) filter is on by default: CALL signals require price above EMA(50), and PUT signals require price below it. The filter also applies to historical replay.
 - The timeframe recommendation uses the pair's 1m ATR as a percentage of its last close. Above `ATR_HIGH_THRESHOLD_PERCENT` recommends 1m; between the high and low thresholds recommends 5m; below `ATR_LOW_THRESHOLD_PERCENT` recommends 15m. The levels and thresholds are configurable in `src/config.ts`.
 - RSI(14) is calculated on closed candles only; RSI at or below 30 suggests CALL and at or above 70 suggests PUT. A signal's timeframe is labelled its **suggested candle timeframe**, not a guaranteed expiry.
+- Bullish means the rule expects price to move up on the next candle; Bearish means it expects price to move down. The dashboard includes plain-language explanations and a glossary for RSI, ATR, EMA, volatility, payout, and sample size.
+- The volatility column shows Low, Medium, or High based on 1m ATR as a percent of price. Expand its ATR details to compare 1m, 5m, 15m, and 1h ATR values.
 - The backtest replays signals over up to 500 closed candles. A win means the next candle's close moved in the signal direction. Every win rate includes its sample size; fewer than 30 signals is flagged as insufficient sample.
+- The payout control explains the break-even win rate in plain language and each pair row compares its historical result to that rate.
 - Recent signals are saved in this browser's local storage. Clearing site data removes that local feed.
 
 ## Limitations and risk

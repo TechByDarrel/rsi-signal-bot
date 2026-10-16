@@ -46,8 +46,8 @@ interface TimeframeAnalysis {
 
 interface PairAnalysis {
   ticker: Ticker24h;
-  recommendation: Timeframe;
-  volatility: "Low" | "Medium" | "High";
+  recommendation: Timeframe | null;
+  volatility: "Low" | "Medium" | "High" | "Unknown";
   frames: Partial<Record<Timeframe, TimeframeAnalysis>>;
 }
 
@@ -60,6 +60,8 @@ interface SignalRecord {
   atrPercent: number;
   entryPrice: number;
   generatedAt: string;
+  emaFilterEnabled?: boolean;
+  priceAboveEma?: boolean | null;
 }
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -82,46 +84,65 @@ app.innerHTML = `
     <main>
       <section class="disclaimer-banner" role="note">
         <span class="banner-icon" aria-hidden="true">!</span>
-        <div><strong>Analysis only — no trades are placed.</strong><span>Binary options carry high risk and may be restricted in your country. This dashboard does not connect to brokers.</span></div>
+        <div><strong>Analysis only. No trades are placed.</strong><span>Binary options carry high risk, may be restricted in your country, and past results do not predict future results.</span></div>
       </section>
 
       <section class="intro-row">
-        <div><p class="eyebrow">BINANCE SPOT · USDT MARKETS</p><h1>Market dashboard</h1><p class="intro-copy">Volatility-ranked pairs, technical signals and historical context — all in your browser.</p></div>
+        <div><p class="eyebrow">BINANCE SPOT · USDT MARKETS</p><h1>Market dashboard</h1><p class="intro-copy">Clear, rule-based market signals and historical context — all in your browser.</p></div>
         <div class="update-card"><span class="eyebrow">LAST UPDATED</span><strong id="last-updated">Waiting for first scan</strong><span id="scan-status" role="status" aria-live="polite">Ready to scan public market data</span></div>
       </section>
 
+      <details class="how-to-panel">
+        <summary><span class="how-icon" aria-hidden="true">?</span><span><strong>How to read this</strong><small>A quick guide to the dashboard</small></span><span class="details-chevron" aria-hidden="true">⌄</span></summary>
+        <ul>
+          <li><b>Bullish</b> = the rule expects price to go up on the next candle (<b>CALL</b>).</li>
+          <li><b>Bearish</b> = the rule expects price to go down on the next candle (<b>PUT</b>).</li>
+          <li><b>Timeframe</b> = the length of one candle; a signal uses that candle size.</li>
+          <li><b>Win rate</b> = how often the rule was right in the past 500 candles. It is not a promise.</li>
+          <li><b>Break-even</b> = the win rate needed to break even at your selected payout.</li>
+        </ul>
+        <div class="glossary" aria-label="Plain-language glossary">
+          <details class="glossary-term"><summary aria-label="What does RSI mean?" title="Open the RSI definition"><span>RSI</span></summary><p><b>RSI:</b> A momentum score from 0 to 100; at or below 30 is oversold and at or above 70 is overbought.</p></details>
+          <details class="glossary-term"><summary aria-label="What does ATR mean?" title="Open the ATR definition"><span>ATR</span></summary><p><b>ATR:</b> The average recent candle range, used here to compare market movement with price.</p></details>
+          <details class="glossary-term"><summary aria-label="What does EMA mean?" title="Open the EMA definition"><span>EMA</span></summary><p><b>EMA:</b> A moving average that gives more weight to recent prices; the optional filter checks price against its 50-candle value.</p></details>
+          <details class="glossary-term"><summary aria-label="What does volatility mean?" title="Open the volatility definition"><span>Volatility</span></summary><p><b>Volatility:</b> How much price has moved recently; this label is based on 1-minute ATR as a percent of price.</p></details>
+          <details class="glossary-term"><summary aria-label="What does payout mean?" title="Open the payout definition"><span>Payout</span></summary><p><b>Payout:</b> The percentage return on a winning outcome used to calculate the break-even rate.</p></details>
+          <details class="glossary-term"><summary aria-label="What does sample size mean?" title="Open the sample size definition"><span>Sample size</span></summary><p><b>Sample size:</b> The number of historical signals counted in the win rate; small samples can be misleading.</p></details>
+        </div>
+      </details>
+
       <section class="rule-panel" aria-labelledby="rule-title">
         <div class="rule-icon" aria-hidden="true">↗</div>
-        <div><h2 id="rule-title">Timeframe recommendation rule</h2><p>Based on 1m ATR as % of last close: <b>High</b> volatility (&gt; ${ATR_HIGH_THRESHOLD_PERCENT}%) → 1m · <b>Medium</b> (${ATR_LOW_THRESHOLD_PERCENT}%–${ATR_HIGH_THRESHOLD_PERCENT}%) → 5m · <b>Low</b> (&lt; ${ATR_LOW_THRESHOLD_PERCENT}%) → 15m. ATR is a measure of recent range, not a forecast.</p></div>
+        <div><h2 id="rule-title">How we recommend a candle size</h2><p>Based on 1m ATR as % of price: <b>High</b> volatility (&gt; ${ATR_HIGH_THRESHOLD_PERCENT}%) → 1m · <b>Medium</b> (${ATR_LOW_THRESHOLD_PERCENT}%–${ATR_HIGH_THRESHOLD_PERCENT}%) → 5m · <b>Low</b> (&lt; ${ATR_LOW_THRESHOLD_PERCENT}%) → 15m. This is a rule of thumb, not a forecast.</p></div>
         <span class="rule-tag">CONFIGURABLE IN SRC/CONFIG.TS</span>
       </section>
 
-      <section class="metrics-grid" aria-label="Market overview">
-        <article class="metric-card"><span class="metric-label">PAIRS IN UNIVERSE</span><strong id="universe-count">—</strong><span>USDT · TRADING</span></article>
-        <article class="metric-card"><span class="metric-label">PAIRS ANALYZED</span><strong id="analyzed-count">—</strong><span>Ranked by 24h range</span></article>
-        <article class="metric-card"><span class="metric-label">ACTIVE SIGNALS</span><strong id="signal-count">—</strong><span>RSI rule on closed candles</span></article>
-        <article class="metric-card"><span class="metric-label">BREAK-EVEN WIN RATE</span><strong id="break-even-value">—</strong><span id="payout-summary">At selected payout</span></article>
+      <section class="summary-grid" aria-label="Signal summary">
+        <article class="metric-card bullish-summary"><span class="metric-label">BULLISH SIGNALS <button class="term-tip" type="button" aria-label="About bullish signal count" title="Pairs whose recommended timeframe currently meets the bullish signal rule.">?</button></span><strong id="bullish-count" title="Current bullish signals on the recommended candle timeframe">—</strong><span>▲ Rule expects price up · CALL</span></article>
+        <article class="metric-card bearish-summary"><span class="metric-label">BEARISH SIGNALS <button class="term-tip" type="button" aria-label="About bearish signal count" title="Pairs whose recommended timeframe currently meets the bearish signal rule.">?</button></span><strong id="bearish-count" title="Current bearish signals on the recommended candle timeframe">—</strong><span>▼ Rule expects price down · PUT</span></article>
+        <article class="metric-card"><span class="metric-label">PAIRS ANALYZED</span><strong id="analyzed-count" tabindex="0" title="Number of top-ranked USDT pairs analyzed">—</strong><span id="universe-summary">Ranked by 24h range</span></article>
+        <article class="metric-card top-pairs-card"><span class="metric-label">TOP 3 BY 24H PRICE RANGE <button class="term-tip" type="button" aria-label="About 24-hour pair ranking" title="Ranked by the high-to-low price range during the last 24 hours, relative to the open.">?</button></span><div id="top-pairs"><span class="muted">Waiting for scan</span></div></article>
       </section>
 
       <section class="controls-panel" aria-label="Dashboard controls">
         <label class="search-control"><span class="sr-only">Search trading pairs</span><span aria-hidden="true">⌕</span><input id="search-input" type="search" placeholder="Search pair…" autocomplete="off" aria-label="Search trading pairs"></label>
-        <label class="select-control">Sort by<select id="sort-select" aria-label="Sort pairs"><option value="volatility">Volatility</option><option value="rsi">RSI</option><option value="win-rate">Historical win rate</option></select></label>
+        <label class="select-control">Sort by<select id="sort-select" aria-label="Sort pairs"><option value="volatility">Volatility</option><option value="rsi">RSI</option><option value="win-rate">Win rate</option></select></label>
         <label class="select-control">Volatility<select id="volatility-filter" aria-label="Filter by volatility"><option value="all">All levels</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option></select></label>
-        <label class="number-control">Payout %<input id="payout-input" type="number" min="0" max="1000" step="1" value="${DEFAULT_PAYOUT_PERCENT}" aria-label="Binary payout percentage"></label>
-        <label class="number-control">Pairs to analyze<input id="pair-limit" type="number" min="1" max="100" step="1" value="${DEFAULT_PAIR_LIMIT}" aria-label="Number of top pairs to analyze"></label>
-        <label class="toggle-control"><input id="ema-toggle" type="checkbox" checked aria-label="Require EMA 50 trend alignment"><span class="toggle-track"></span><span>EMA(50) filter</span><span class="help-tip" title="CALL only above EMA(50); PUT only below EMA(50). Applies to live signals and backtests." aria-label="EMA(50) trend filter: CALL only above EMA, PUT only below EMA">i</span></label>
+        <div class="payout-control"><label class="number-control">Payout % <button class="term-tip" type="button" aria-label="What is payout?" title="The percentage return on a winning outcome. Break-even is 100 / (100 + payout) × 100.">?</button><input id="payout-input" type="number" min="0" max="1000" step="1" value="${DEFAULT_PAYOUT_PERCENT}" aria-label="Binary payout percentage" title="Enter the payout percentage to update the break-even calculation."></label><span id="payout-summary" class="payout-explainer" aria-live="polite">You need to win about 55.6% of outcomes to break even at 80%.</span></div>
+        <label class="number-control">Pairs to analyze<input id="pair-limit" type="number" min="1" max="100" step="1" value="${DEFAULT_PAIR_LIMIT}" aria-label="Number of top pairs to analyze" title="Analyze this many of the pairs with the largest 24-hour range"></label>
+        <label class="toggle-control"><input id="ema-toggle" type="checkbox" checked aria-label="Require EMA 50 trend alignment"><span class="toggle-track"></span><span>EMA(50) filter</span><button class="term-tip" type="button" aria-label="About the EMA filter" title="When on, Bullish signals require price above EMA(50); Bearish signals require price below it.">?</button></label>
       </section>
 
       <div id="error-state" class="error-state" role="alert" hidden></div>
       <section class="data-panel" aria-labelledby="pairs-title">
-        <div class="section-heading"><div><p class="eyebrow">LIVE SCAN</p><h2 id="pairs-title">Top volatile pairs</h2></div><span id="table-summary" class="muted">Waiting for data</span></div>
+        <div class="section-heading"><div><p class="eyebrow">LIVE SCAN · CLOSED CANDLES</p><h2 id="pairs-title">Pair signals</h2></div><span id="table-summary" class="muted">Waiting for data</span></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th scope="col">PAIR</th><th scope="col">PRICE</th><th scope="col">24H RANGE</th><th scope="col">ATR % <span class="th-sub">1m · 5m · 15m · 1h</span></th><th scope="col">RECOMMENDED</th><th scope="col">RSI</th><th scope="col">SIGNAL</th><th scope="col">HISTORICAL WIN RATE</th></tr></thead>
-            <tbody id="pairs-body"><tr><td colspan="8"><div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div></td></tr></tbody>
+            <thead><tr><th scope="col">PAIR</th><th scope="col">PRICE</th><th scope="col">24H CHANGE</th><th scope="col">VOLATILITY</th><th scope="col">CANDLE TIMEFRAME</th><th scope="col">RSI</th><th scope="col">SIGNAL</th><th scope="col">HISTORICAL WIN RATE</th><th scope="col">BREAK-EVEN</th><th scope="col">SAMPLE SIZE</th></tr></thead>
+            <tbody id="pairs-body"><tr><td colspan="10"><div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div></td></tr></tbody>
           </table>
         </div>
-        <div class="table-footnote">The win rate shown is for the recommended timeframe. Sample size is shown beside every rate; fewer than 30 signals is marked insufficient.</div>
+        <div class="table-footnote">Volatility uses 1m ATR as a percent of price. Hover or focus a number for its meaning. Win rate replays up to 500 closed candles, one candle ahead.</div>
       </section>
 
       <div class="lower-grid">
@@ -130,12 +151,12 @@ app.innerHTML = `
           <div id="signal-feed" class="signal-feed"><div class="empty-state">Signals will appear here when the RSI rules are met.</div></div>
         </section>
         <section class="data-panel backtest-panel" aria-labelledby="backtest-title">
-          <div class="section-heading"><div><p class="eyebrow">500 CLOSED CANDLES · ONE-CANDLE OUTCOME</p><h2 id="backtest-title">Historical edge</h2></div><span class="muted">by pair / timeframe</span></div>
+          <div class="section-heading"><div><p class="eyebrow">UP TO 500 CLOSED CANDLES · NEXT-CANDLE CHECK</p><h2 id="backtest-title">Past results</h2></div><span class="muted">pair · candle size</span></div>
           <div class="warning-note"><span aria-hidden="true">⚠</span><p><strong>Historical results do not predict future results.</strong> Backtests are simplified and exclude fees, slippage, and execution.</p></div>
           <div class="table-wrap compact-table"><table><thead><tr><th scope="col">PAIR</th><th scope="col">TIMEFRAME</th><th scope="col">WIN RATE</th><th scope="col">SAMPLE</th><th scope="col">VS BREAK-EVEN</th></tr></thead><tbody id="backtest-body"><tr><td colspan="5" class="empty-cell">Backtest results appear after scanning.</td></tr></tbody></table></div>
         </section>
       </div>
-      <footer><span>Data: Binance public spot market API</span><span>Analysis only · No broker connections · No trades placed</span></footer>
+      <footer><span>Market data: Binance public spot API</span><span>Analysis only · No broker connections · No trades placed</span></footer>
     </main>
   </div>`;
 
@@ -143,10 +164,11 @@ const elements = {
   status: document.querySelector<HTMLElement>("#scan-status")!,
   error: document.querySelector<HTMLElement>("#error-state")!,
   updated: document.querySelector<HTMLElement>("#last-updated")!,
-  universe: document.querySelector<HTMLElement>("#universe-count")!,
   analyzed: document.querySelector<HTMLElement>("#analyzed-count")!,
-  signalCount: document.querySelector<HTMLElement>("#signal-count")!,
-  breakEven: document.querySelector<HTMLElement>("#break-even-value")!,
+  bullish: document.querySelector<HTMLElement>("#bullish-count")!,
+  bearish: document.querySelector<HTMLElement>("#bearish-count")!,
+  topPairs: document.querySelector<HTMLElement>("#top-pairs")!,
+  universeSummary: document.querySelector<HTMLElement>("#universe-summary")!,
   payoutSummary: document.querySelector<HTMLElement>("#payout-summary")!,
   summary: document.querySelector<HTMLElement>("#table-summary")!,
   pairsBody: document.querySelector<HTMLTableSectionElement>("#pairs-body")!,
@@ -198,6 +220,11 @@ function isSignalRecord(value: unknown): value is SignalRecord {
     Number.isFinite(record.atrPercent) &&
     typeof record.entryPrice === "number" &&
     Number.isFinite(record.entryPrice) &&
+    (record.emaFilterEnabled === undefined ||
+      typeof record.emaFilterEnabled === "boolean") &&
+    (record.priceAboveEma === undefined ||
+      record.priceAboveEma === null ||
+      typeof record.priceAboveEma === "boolean") &&
     typeof record.generatedAt === "string"
   );
 }
@@ -297,6 +324,9 @@ function addNewSignals(analyses: PairAnalysis[]): void {
         atrPercent: frame.atrPercent,
         entryPrice: candle.close,
         generatedAt: new Date().toISOString(),
+        emaFilterEnabled: elements.ema.checked,
+        priceAboveEma:
+          frame.ema === null ? null : candle.close > frame.ema,
       });
       currentIds.add(id);
     }
@@ -310,10 +340,31 @@ function addNewSignals(analyses: PairAnalysis[]): void {
 }
 
 function volatilityFor(atrPercent: number | null): PairAnalysis["volatility"] {
-  if (atrPercent === null) return "Medium";
+  if (atrPercent === null) return "Unknown";
   if (atrPercent > ATR_HIGH_THRESHOLD_PERCENT) return "High";
   if (atrPercent < ATR_LOW_THRESHOLD_PERCENT) return "Low";
   return "Medium";
+}
+
+function explainSignal(signal: SignalRecord): string {
+  const value = signal.rsi.toFixed(1);
+  const oversold = signal.direction === "CALL";
+  if (
+    signal.emaFilterEnabled &&
+    typeof signal.priceAboveEma === "boolean"
+  ) {
+    return `RSI ${value} is ${oversold ? "oversold" : "overbought"} and price is ${oversold ? "above" : "below"} its 50-period average, so the rule expects a move ${oversold ? "up" : "down"} on the next candle.`;
+  }
+  return `RSI ${value} is ${oversold ? "oversold" : "overbought"}, so the rule expects price to move ${oversold ? "up" : "down"} on the next candle.`;
+}
+
+function signalMarkup(
+  direction: SignalDirection | null,
+  className = "signal-pill",
+): string {
+  if (!direction) return `<span class="neutral-signal">— No signal</span>`;
+  const bullish = direction === "CALL";
+  return `<span class="${className} ${bullish ? "bullish" : "bearish"}" aria-label="${bullish ? "Bullish signal, CALL" : "Bearish signal, PUT"}"><span aria-hidden="true">${bullish ? "▲" : "▼"}</span> ${bullish ? "BULLISH" : "BEARISH"} <small>· ${direction}</small></span>`;
 }
 
 function getVisiblePairs(): PairAnalysis[] {
@@ -328,14 +379,18 @@ function getVisiblePairs(): PairAnalysis[] {
   if (elements.sort.value === "rsi") {
     visible.sort(
       (a, b) =>
-        (a.frames[a.recommendation]?.rsi ?? 101) -
-        (b.frames[b.recommendation]?.rsi ?? 101),
+        (a.recommendation ? a.frames[a.recommendation]?.rsi ?? 101 : 101) -
+        (b.recommendation ? b.frames[b.recommendation]?.rsi ?? 101 : 101),
     );
   } else if (elements.sort.value === "win-rate") {
     visible.sort(
       (a, b) =>
-        (b.frames[b.recommendation]?.backtest.winRate ?? -1) -
-        (a.frames[a.recommendation]?.backtest.winRate ?? -1),
+        (b.recommendation
+          ? b.frames[b.recommendation]?.backtest.winRate ?? -1
+          : -1) -
+        (a.recommendation
+          ? a.frames[a.recommendation]?.backtest.winRate ?? -1
+          : -1),
     );
   } else {
     visible.sort((a, b) => b.ticker.rangePercent - a.ticker.rangePercent);
@@ -348,43 +403,83 @@ function renderPairs(): void {
   const breakEven = breakEvenWinRate(getPayout());
   elements.pairsBody.innerHTML =
     visible.length === 0
-      ? `<tr><td colspan="8" class="empty-cell">No pairs match these filters.</td></tr>`
+      ? `<tr><td colspan="10" class="empty-cell">No pairs match these filters.</td></tr>`
       : visible
           .map((pair) => {
-            const recommended = pair.frames[pair.recommendation];
+            const recommended = pair.recommendation
+              ? pair.frames[pair.recommendation]
+              : undefined;
             const result = recommended?.backtest;
-            const signal = recommended?.direction;
-            const rsiValue = recommended?.rsi;
-            const beats = result?.winRate !== null &&
-              result?.winRate !== undefined &&
-              result.winRate >= breakEven;
-            const atrCells = TIMEFRAMES.map((timeframe) => {
+            const signal = recommended?.direction ?? null;
+            const rsiValue = recommended?.rsi ?? null;
+            const hasData = Boolean(recommended && rsiValue !== null);
+            const status = !hasData
+              ? "Not enough data"
+              : signal === "CALL"
+                ? "Bullish signal active"
+                : signal === "PUT"
+                  ? "Bearish signal active"
+                  : "Waiting for signal";
+            const rowTone = signal
+              ? signal === "CALL"
+                ? "row-bullish"
+                : "row-bearish"
+              : "row-neutral";
+            const sampleCount = result?.samples ?? 0;
+            const insufficient = sampleCount < 30;
+            const winRate = result?.winRate ?? null;
+            const hasWinRate = winRate !== null;
+            const beats = winRate !== null && winRate >= breakEven;
+            const frameAtr = recommended?.atrPercent;
+            const atrDetailValues = TIMEFRAMES.map((timeframe) => {
               const value = pair.frames[timeframe]?.atrPercent;
-              return `<span class="atr-value">${value === null || value === undefined ? "—" : `${value.toFixed(3)}%`}</span>`;
-            }).join("");
+              return { timeframe, value };
+            });
+            const atrDetails = atrDetailValues
+              .map(({ timeframe, value }) =>
+                `${timeframe}: ${value === null || value === undefined ? "not available" : `${value.toFixed(3)}%`}`,
+              )
+              .join(" · ");
+            const atrDetailMarkup = atrDetailValues
+              .map(
+                ({ timeframe, value }) =>
+                  `<span title="${timeframe} ATR(14) divided by last closed price.">${timeframe} <b>${value === null || value === undefined ? "—" : `${value.toFixed(3)}%`}</b></span>`,
+              )
+              .join("");
+            const volatilityDescription =
+              frameAtr === null || frameAtr === undefined
+                ? "Volatility not available: not enough candle data."
+                : `${pair.volatility} volatility. ATR as percent of price: ${atrDetails}.`;
+            const priceChangeTitle = `24-hour price change: ${pair.ticker.changePercent.toFixed(2)}%.`;
+            const rsiTitle =
+              rsiValue === null
+                ? "RSI is unavailable: not enough closed candles."
+                : `RSI ${rsiValue.toFixed(1)}: ${rsiValue <= RSI_OVERSOLD ? `at or below ${RSI_OVERSOLD}, which is oversold and meets the bullish rule` : rsiValue >= RSI_OVERBOUGHT ? `at or above ${RSI_OVERBOUGHT}, which is overbought and meets the bearish rule` : "between the signal thresholds, so there is no RSI signal"}.`;
 
-            return `<tr>
-              <td><span class="pair-cell"><strong>${escapeHtml(pair.ticker.symbol.replace(/USDT$/, ""))}</strong><small>USDT</small></span></td>
-              <td class="price-cell">${formatPrice(pair.ticker.last)}</td>
-              <td><strong>${pair.ticker.rangePercent.toFixed(2)}%</strong><span class="volatility-badge ${pair.volatility.toLowerCase()}">${pair.volatility}</span></td>
-              <td><div class="atr-grid">${atrCells}</div></td>
-              <td><span class="timeframe-chip">${pair.recommendation}</span></td>
-              <td>${rsiValue === null || rsiValue === undefined ? "—" : `<span class="rsi-value ${rsiValue <= RSI_OVERSOLD ? "call-text" : rsiValue >= RSI_OVERBOUGHT ? "put-text" : ""}">${rsiValue.toFixed(1)}</span>`}</td>
-              <td>${signal ? `<span class="signal-pill ${signal.toLowerCase()}">${signal}</span>` : `<span class="neutral-signal">—</span>`}</td>
-              <td>${result?.winRate === null || result?.winRate === undefined ? `<span class="muted">—</span><span class="sample-count">0 signals</span><span class="sample-warning">Insufficient sample</span>` : `<span class="rate-value ${beats ? "positive" : "negative"}">${result.winRate.toFixed(1)}%</span><span class="sample-count">${result.wins} / ${result.samples} wins</span>${result.samples < 30 ? `<span class="sample-warning">Insufficient sample</span>` : ""}`}</td>
+            return `<tr class="${rowTone}">
+              <td><span class="pair-cell"><strong>${escapeHtml(pair.ticker.symbol.replace(/USDT$/, ""))}</strong><small>/ USDT</small></span></td>
+              <td class="price-cell" tabindex="0" title="Latest price from Binance public market data.">${formatPrice(pair.ticker.last)}</td>
+              <td><strong class="change-value ${pair.ticker.changePercent >= 0 ? "positive-change" : "negative-change"}" tabindex="0" aria-label="${priceChangeTitle}" title="${priceChangeTitle}">${pair.ticker.changePercent >= 0 ? "▲" : "▼"} ${Math.abs(pair.ticker.changePercent).toFixed(2)}%</strong></td>
+              <td><span class="volatility-badge ${frameAtr === null || frameAtr === undefined ? "unknown" : pair.volatility.toLowerCase()}" tabindex="0" title="${escapeHtml(volatilityDescription)}">${hasData ? pair.volatility : "Unknown"}</span><span class="volatility-detail" tabindex="0" title="${escapeHtml(`${atrDetails} · 24-hour range ${pair.ticker.rangePercent.toFixed(2)}%`)}">${frameAtr === null || frameAtr === undefined ? "ATR% unavailable" : `1m ATR ${frameAtr.toFixed(3)}%`}</span><details class="atr-details"><summary>ATR% details</summary><div>${atrDetailMarkup}</div></details></td>
+              <td>${pair.recommendation ? `<span class="timeframe-chip" tabindex="0" title="Recommended candle length based on 1m volatility">${pair.recommendation}</span>` : `<span class="muted" title="Not enough candle data to recommend a timeframe">Not available</span>`}</td>
+              <td>${rsiValue === null ? `<span class="muted" tabindex="0" title="${rsiTitle}">—</span>` : `<span class="rsi-value ${rsiValue <= RSI_OVERSOLD ? "bullish-text" : rsiValue >= RSI_OVERBOUGHT ? "bearish-text" : ""}" tabindex="0" title="${rsiTitle}">${rsiValue.toFixed(1)}</span><button class="number-help" type="button" title="${rsiTitle}" aria-label="${rsiTitle}">?</button>`}</td>
+              <td>${signalMarkup(signal)}<span class="pair-status ${signal ? signal === "CALL" ? "bullish-text" : "bearish-text" : ""}">${status}</span></td>
+              <td>${hasWinRate ? `<span class="rate-value ${insufficient ? "insufficient-rate" : beats ? "positive" : "negative"}" tabindex="0" title="Historical win rate over ${sampleCount} signal${sampleCount === 1 ? "" : "s"}; one-candle-ahead replay.">${winRate.toFixed(1)}%</span>` : `<span class="muted" tabindex="0" title="No historical signals were found">—</span>`}${insufficient ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td>
+              <td><span class="break-even-value" tabindex="0" title="At ${getPayout()}% payout, break-even is 100 / (100 + payout) × 100.">${breakEven.toFixed(1)}%</span></td>
+              <td><span class="sample-count ${insufficient ? "insufficient-sample" : ""}" tabindex="0" title="Number of historical signals counted in the win rate.">${sampleCount}</span>${insufficient ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td>
             </tr>`;
           })
           .join("");
   elements.summary.textContent = `${visible.length} of ${pairs.length} analyzed pairs`;
   elements.analyzed.textContent = String(pairs.length);
-  elements.signalCount.textContent = String(
-    pairs.reduce(
-      (count, pair) =>
-        count +
-        TIMEFRAMES.filter((timeframe) => Boolean(pair.frames[timeframe]?.direction))
-          .length,
-      0,
-    ),
+  const recommendedSignals = pairs.map((pair) =>
+    pair.recommendation ? pair.frames[pair.recommendation]?.direction : null,
+  );
+  elements.bullish.textContent = String(
+    recommendedSignals.filter((direction) => direction === "CALL").length,
+  );
+  elements.bearish.textContent = String(
+    recommendedSignals.filter((direction) => direction === "PUT").length,
   );
 }
 
@@ -403,11 +498,12 @@ function renderFeed(): void {
               historical?.winRate === null || historical?.winRate === undefined
                 ? "Historical rate unavailable"
                 : `Historical ${historical.winRate.toFixed(1)}% · n=${historical.samples}${historical.samples < 30 ? " · insufficient sample" : ""}`;
+            const why = explainSignal(signal);
             return `<article class="feed-card">
-              <span class="feed-direction ${signal.direction.toLowerCase()}">${signal.direction}</span>
-              <div class="feed-main"><strong>${escapeHtml(signal.symbol.replace(/USDT$/, ""))}<small>/ USDT</small></strong><span>${signal.timeframe} suggested candle timeframe (not a guaranteed expiry) · RSI ${signal.rsi.toFixed(1)}</span><span class="feed-history">${historicalText}</span></div>
-              <div class="feed-meta"><strong>${formatPrice(signal.entryPrice)}</strong><span>${new Date(signal.generatedAt).toLocaleString()}</span></div>
-              <span class="feed-atr">ATR ${signal.atrPercent.toFixed(3)}%</span>
+              ${signalMarkup(signal.direction, "feed-direction")}
+              <div class="feed-main"><strong>${escapeHtml(signal.symbol.replace(/USDT$/, ""))}<small>/ USDT</small></strong><span title="Suggested candle length for this signal; not a guaranteed expiry.">${signal.timeframe} suggested candle timeframe · RSI ${signal.rsi.toFixed(1)}</span><span class="feed-why"><b>Why this signal?</b> ${why}</span><span class="feed-history" title="${historicalText}">${historicalText}</span></div>
+              <div class="feed-meta"><strong title="Entry price when this signal was generated.">${formatPrice(signal.entryPrice)}</strong><span title="Time when the signal was first detected.">${new Date(signal.generatedAt).toLocaleString()}</span></div>
+              <span class="feed-atr" title="ATR(14) as a percentage of the last closed price.">Volatility ${signal.atrPercent.toFixed(3)}%</span>
             </article>`;
           })
           .join("");
@@ -423,22 +519,33 @@ function renderBacktest(): void {
           .flatMap((pair) =>
             TIMEFRAMES.map((timeframe) => {
               const result = pair.frames[timeframe]?.backtest;
-              if (!result || result.samples === 0 || result.winRate === null) {
+              const winRate = result?.winRate ?? null;
+              if (!result || result.samples === 0 || winRate === null) {
                 return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td>—<span class="sample-warning">Insufficient sample</span></td><td>0</td><td class="muted">No signals</td></tr>`;
               }
-              const above = result.winRate >= breakEven;
-              return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td><strong class="${above ? "call-text" : "put-text"}">${result.winRate.toFixed(1)}%</strong></td><td>${result.samples}${result.samples < 30 ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td><td><span class="edge-badge ${above ? "above" : "below"}">${above ? "Above" : "Below"} ${breakEven.toFixed(1)}%</span></td></tr>`;
+              const above = winRate >= breakEven;
+              return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td><strong class="${result.samples < 30 ? "insufficient-rate" : above ? "positive" : "negative"}" title="Historical win rate; one candle ahead.">${winRate.toFixed(1)}%</strong></td><td>${result.samples}${result.samples < 30 ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td><td><span class="edge-badge ${result.samples < 30 ? "unknown" : above ? "above" : "below"}">${result.samples < 30 ? "Insufficient sample" : above ? "Above" : "Below"} ${breakEven.toFixed(1)}%</span></td></tr>`;
             }),
           )
           .join("");
 }
 
 function renderAll(): void {
-  elements.universe.textContent = universeCount
-    ? universeCount.toLocaleString()
-    : "—";
-  elements.breakEven.textContent = `${breakEvenWinRate(getPayout()).toFixed(1)}%`;
-  elements.payoutSummary.textContent = `At ${getPayout()}% payout`;
+  const breakEven = breakEvenWinRate(getPayout());
+  elements.payoutSummary.textContent = `You need to win about ${breakEven.toFixed(1)}% of outcomes to break even at ${getPayout()}%.`;
+  elements.universeSummary.textContent = `${universeCount.toLocaleString()} active USDT pairs · ranked by 24h range`;
+  const top = [...pairs]
+    .sort((left, right) => right.ticker.rangePercent - left.ticker.rangePercent)
+    .slice(0, 3);
+  elements.topPairs.innerHTML =
+    top.length === 0
+      ? `<span class="muted">Waiting for scan</span>`
+      : top
+          .map(
+            (pair, index) =>
+              `<span class="top-pair" title="${pair.ticker.rangePercent.toFixed(2)}% 24-hour high-to-low range"><b>${index + 1}.</b> ${escapeHtml(pair.ticker.symbol.replace(/USDT$/, ""))}<small>${pair.ticker.rangePercent.toFixed(2)}% · ${pair.recommendation ?? "No timeframe"}</small></span>`,
+          )
+          .join("");
   renderPairs();
   renderFeed();
   renderBacktest();
@@ -451,7 +558,7 @@ function setStatus(message: string): void {
 function renderSkeleton(): void {
   elements.pairsBody.innerHTML = Array.from(
     { length: 8 },
-    () => `<tr><td colspan="8"><div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div></td></tr>`,
+    () => `<tr><td colspan="10"><div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div></td></tr>`,
   ).join("");
 }
 
@@ -492,11 +599,14 @@ async function scan(): Promise<void> {
       return {
         ticker,
         frames,
-        recommendation: recommendTimeframe(
-          oneMinuteAtr ?? ATR_LOW_THRESHOLD_PERCENT,
-          ATR_LOW_THRESHOLD_PERCENT,
-          ATR_HIGH_THRESHOLD_PERCENT,
-        ),
+        recommendation:
+          oneMinuteAtr === null
+            ? null
+            : recommendTimeframe(
+                oneMinuteAtr,
+                ATR_LOW_THRESHOLD_PERCENT,
+                ATR_HIGH_THRESHOLD_PERCENT,
+              ),
         volatility: volatilityFor(oneMinuteAtr),
       };
     });
@@ -516,7 +626,7 @@ async function scan(): Promise<void> {
     elements.error.hidden = false;
     setStatus("Scan failed · refresh to retry");
     if (pairs.length === 0) {
-      elements.pairsBody.innerHTML = `<tr><td colspan="8" class="empty-cell">Market data could not be loaded. Check your connection and refresh.</td></tr>`;
+      elements.pairsBody.innerHTML = `<tr><td colspan="10" class="empty-cell">Market data could not be loaded. Check your connection and refresh.</td></tr>`;
     }
   } finally {
     isScanning = false;

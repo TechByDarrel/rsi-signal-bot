@@ -125,13 +125,19 @@ export function recommendTimeframe(
 }
 
 export type SignalDirection = "CALL" | "PUT";
+export type PlainSignalLabel = "Bullish" | "Bearish" | "None";
 
-export function signalDirection(
-  value: number | null,
-): SignalDirection | null {
-  if (value === null) return null;
-  if (value <= RSI_OVERSOLD) return "CALL";
-  if (value >= RSI_OVERBOUGHT) return "PUT";
+export function signalLabel(value: number | null): PlainSignalLabel {
+  if (value === null) return "None";
+  if (value <= RSI_OVERSOLD) return "Bullish";
+  if (value >= RSI_OVERBOUGHT) return "Bearish";
+  return "None";
+}
+
+export function signalDirection(value: number | null): SignalDirection | null {
+  const label = signalLabel(value);
+  if (label === "Bullish") return "CALL";
+  if (label === "Bearish") return "PUT";
   return null;
 }
 

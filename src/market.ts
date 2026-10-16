@@ -21,6 +21,7 @@ export interface Ticker24h {
   high: number;
   low: number;
   last: number;
+  changePercent: number;
   rangePercent: number;
 }
 
@@ -111,6 +112,7 @@ export async function fetch24hTickers(
       highPrice: string;
       lowPrice: string;
       lastPrice: string;
+      priceChangePercent: string;
     }>
   >(`${BINANCE_API}/api/v3/ticker/24hr`);
 
@@ -126,6 +128,7 @@ export async function fetch24hTickers(
         high,
         low,
         last: Number(ticker.lastPrice),
+        changePercent: Number(ticker.priceChangePercent),
         rangePercent: open > 0 ? ((high - low) / open) * 100 : 0,
       };
     });

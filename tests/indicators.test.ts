@@ -4,6 +4,7 @@ import {
   breakEvenWinRate,
   recommendTimeframe,
   rsi,
+  signalLabel,
 } from "../src/indicators";
 
 describe("rsi", () => {
@@ -58,5 +59,16 @@ describe("recommendTimeframe", () => {
 
   it("rejects inconsistent thresholds", () => {
     expect(() => recommendTimeframe(0.2, 0.3, 0.2)).toThrow(RangeError);
+  });
+});
+
+describe("signalLabel", () => {
+  it("maps RSI thresholds to plain-language bullish and bearish labels", () => {
+    expect(signalLabel(28.4)).toBe("Bullish");
+    expect(signalLabel(30)).toBe("Bullish");
+    expect(signalLabel(50)).toBe("None");
+    expect(signalLabel(70)).toBe("Bearish");
+    expect(signalLabel(72.1)).toBe("Bearish");
+    expect(signalLabel(null)).toBe("None");
   });
 });
