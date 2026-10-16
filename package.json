@@ -2,16 +2,19 @@
   "name": "rsi-signal-bot",
   "version": "1.0.0",
   "private": true,
-  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "build": "tsc",
-    "start": "npm run build && node dist/index.js"
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
-    "@types/node": "^20",
-    "typescript": "^5.4"
+    "typescript": "^5.4",
+    "vite": "^7.3.1",
+    "vitest": "^4.1.12"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19"
   }
 }

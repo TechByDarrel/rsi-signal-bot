@@ -1,31 +1,45 @@
 # RSI Signal Bot
 
-An alert-only personal-use bot that watches cryptocurrency pairs on Binance, calculates RSI, and records possible CALL and PUT signals. It does not place trades or connect to a broker.
+A browser-based dashboard that scans Binance spot markets quoted in USDT, ranks pairs by their 24-hour high-low range, and displays RSI-based CALL/PUT signals with a simplified historical backtest. It is for market analysis and alerting only: it does not connect to Pocket Option, any broker, or place trades or orders.
 
-## Setup
+## Local development
 
-Install dependencies and start the bot with Node.js 18 or later:
+Requires Node.js 20.19 or later.
 
 ```sh
 npm install
-npm start
+npm run dev
 ```
 
-The bot fetches public market candle data from Binance. It creates `logs/signals.csv` when it starts.
+Vite prints the local URL. The app runs entirely in your browser and fetches Binance public market data without API keys. If Binance rate-limits requests, the dashboard displays the wait and retries after the requested delay.
 
-## Configuration
+## Tests and production build
 
-Change the watched pairs, candle interval, RSI thresholds, expiry, polling interval, and CSV path in [`src/config.ts`](src/config.ts).
+```sh
+npm test
+npm run build
+```
 
-## Reading the output
+Vitest covers RSI, ATR, the break-even payout calculation, and the timeframe recommendation rule.
 
-Each polling tick prints a table with the pair, latest closed-candle price, RSI, and any signal. A CALL signal is raised when RSI is at or below the oversold threshold; a PUT signal is raised when RSI is at or above the overbought threshold. The bot also prints each signal, its eventual WIN or LOSS result, and a running record.
+## How to use the dashboard
 
-The CSV contains a signal row with status `OPEN`, followed by a result row when the signal is evaluated. Result rows have status and result set to `WIN` or `LOSS`, along with the comparison price.
+- The universe is loaded dynamically from Binance exchange information (USDT quote assets in `TRADING` status). The app ranks that universe by `((24h high - 24h low) / 24h open) * 100` and deeply analyzes the selected top pairs.
+- Adjust the number of pairs, search, sort, filter by volatility, and set a binary payout percentage. Break-even is `100 / (100 + payout) * 100` percent. It is a comparison reference, not a prediction.
+- The optional EMA(50) filter is on by default: CALL signals require price above EMA(50), and PUT signals require price below it. The filter also applies to historical replay.
+- The timeframe recommendation uses the pair's 1m ATR as a percentage of its last close. Above `ATR_HIGH_THRESHOLD_PERCENT` recommends 1m; between the high and low thresholds recommends 5m; below `ATR_LOW_THRESHOLD_PERCENT` recommends 15m. The levels and thresholds are configurable in `src/config.ts`.
+- RSI(14) is calculated on closed candles only; RSI at or below 30 suggests CALL and at or above 70 suggests PUT. A signal's timeframe is labelled its **suggested candle timeframe**, not a guaranteed expiry.
+- The backtest replays signals over up to 500 closed candles. A win means the next candle's close moved in the signal direction. Every win rate includes its sample size; fewer than 30 signals is flagged as insufficient sample.
+- Recent signals are saved in this browser's local storage. Clearing site data removes that local feed.
 
-## Limitations
+## Limitations and risk
 
-- Market data comes from Binance, not Pocket Option or any other broker.
-- The expiry check is a simple comparison between the entry price and a later fetched candle price; it does not model broker pricing or execution.
-- This software is for alerts and record-keeping only. It does not place trades or orders.
-- Nothing here is financial advice. Test on demo first.
+Data comes from Binance public spot markets, not Pocket Option or a broker. The historical result is a simple one-candle price comparison and excludes fees, slippage, execution, and other real-world factors. Historical results do not predict future results. Binary options carry high risk and may be restricted in your country. Nothing here is financial advice. The app only analyzes and displays signals; it never places trades.
+
+## GitHub Pages deployment
+
+The included GitHub Actions workflow builds and deploys `dist/` on every push to `main`. One-time setup: in your repository, open **Settings > Pages** and set **Source** to **GitHub Actions**.
+
+The expected live URL is:
+
+<https://TECHBYDARREL.github.io/rsi-signal-bot/>
