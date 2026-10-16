@@ -9,9 +9,52 @@
     />
     <meta name="theme-color" content="#0b1117" />
     <title>RSI Signal Bot — Market dashboard</title>
+    <script>
+      (() => {
+        let pendingError = "";
+        const showError = (message) => {
+          const fallback = document.getElementById("startup-error");
+          const detail = document.getElementById("startup-error-detail");
+          if (!fallback || !detail) {
+            pendingError = message;
+            return;
+          }
+          detail.textContent = ` ${message}`;
+          fallback.hidden = false;
+        };
+
+        document.addEventListener("DOMContentLoaded", () => {
+          if (pendingError) showError(pendingError);
+        });
+        window.addEventListener(
+          "error",
+          (event) => {
+            showError(event.message || "The dashboard failed to start.");
+          },
+          true,
+        );
+        window.addEventListener("unhandledrejection", (event) => {
+          const reason = event.reason;
+          showError(
+            reason instanceof Error
+              ? reason.message
+              : String(reason || "The dashboard failed to start."),
+          );
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
+    <div
+      id="startup-error"
+      role="alert"
+      hidden
+      style="margin: 2rem auto; max-width: 48rem; padding: 1rem 1.25rem; border: 1px solid #ef4444; border-radius: .75rem; color: #fecaca; background: #271416; font: 500 1rem/1.5 system-ui, sans-serif;"
+    >
+      <strong>The dashboard could not start.</strong>
+      <span id="startup-error-detail"></span>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
