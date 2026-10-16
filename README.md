@@ -32,6 +32,10 @@ Vitest covers RSI, ATR, the break-even payout calculation, the timeframe recomme
 - Bullish means the rule expects price to move up on the next candle; Bearish means it expects price to move down. The dashboard includes plain-language explanations and a glossary for RSI, ATR, EMA, volatility, payout, and sample size.
 - The volatility column shows Low, Medium, or High based on 1m ATR as a percent of price. Expand its ATR details to compare 1m, 5m, 15m, and 1h ATR values.
 - The backtest replays signals over up to 500 closed candles. A win means the next candle's close moved in the signal direction. Every win rate includes its sample size; fewer than 30 signals is flagged as insufficient sample.
+- Live candle updates arrive over Binance public WebSocket kline streams (up to 200 streams per connection). Each connection reconnects with exponential backoff and rotates before Binance's 24-hour connection limit. When every stream is offline, REST scans continue as a fallback.
+- Developing warnings are evaluated from the forming candle only during the selected 2- or 5-minute lead window. They may change before close; confirmed signals are evaluated after close, and reversed warnings remain visible in the feed as cancelled.
+- Confirmed backtests use up to 500 closed candles. Early-warning replay uses matching 1-minute candle snapshots; the browser's bounded 1-minute history may provide fewer than 500 samples for longer timeframes, which is reflected in the displayed sample size. Cancelled early warnings are reported separately.
+- Browser notifications are optional and only requested when the notification toggle is enabled; the browser must grant permission.
 - The payout control explains the break-even win rate in plain language and each pair row compares its historical result to that rate.
 - Recent signals are saved in this browser's local storage. Clearing site data removes that local feed.
 

@@ -2,16 +2,24 @@ import {
   ATR_HIGH_THRESHOLD_PERCENT,
   ATR_LOW_THRESHOLD_PERCENT,
   ATR_PERIOD,
+  CANDLES_TO_ANALYZE,
   DEFAULT_PAIR_LIMIT,
   DEFAULT_PAYOUT_PERCENT,
+  DEFAULT_EARLY_WARNING_MINUTES,
   EMA_PERIOD,
   REFRESH_INTERVAL_MS,
+  REST_FALLBACK_INTERVAL_MS,
   RSI_OVERBOUGHT,
   RSI_OVERSOLD,
   RSI_PERIOD,
   SIGNAL_STORAGE_KEY,
   SIGNAL_STORAGE_LIMIT,
   TIMEFRAMES,
+  UI_UPDATE_INTERVAL_MS,
+  WEBSOCKET_MAX_STREAMS,
+  WEBSOCKET_RECONNECT_BASE_MS,
+  WEBSOCKET_RECONNECT_MAX_MS,
+  WEBSOCKET_ROTATE_MS,
   type Timeframe,
 } from "./config";
 import {
@@ -33,15 +41,29 @@ import {
   type Candle,
   type Ticker24h,
 } from "./market";
+import {
+  calculateDevelopingWinRate,
+  CandleBuffer,
+  isWithinEarlyWarningWindow,
+  replayDevelopingSignals,
+  transitionSignalState,
+  type SignalState,
+  type SignalTransition,
+} from "./realtime";
 import "./style.css";
 
 interface TimeframeAnalysis {
   candles: Candle[];
+  oneMinuteLastOpenTime: number | null;
   rsi: number | null;
   atrPercent: number | null;
   ema: number | null;
   direction: SignalDirection | null;
   backtest: ReturnType<typeof backtestSignals>;
+  developingBacktest: ReturnType<typeof calculateDevelopingWinRate>;
+  backtestEmaFilter: boolean;
+  developingEmaFilter: boolean;
+  developingLeadMinutes: 2 | 5;
 }
 
 interface PairAnalysis {
@@ -56,12 +78,39 @@ interface SignalRecord {
   symbol: string;
   timeframe: Timeframe;
   direction: SignalDirection;
+  state: SignalState;
   rsi: number;
   atrPercent: number;
   entryPrice: number;
   generatedAt: string;
   emaFilterEnabled?: boolean;
   priceAboveEma?: boolean | null;
+  closeTime?: number;
+  remainingMs?: number;
+}
+
+interface ActiveSignal {
+  candleOpenTime: number;
+  direction: SignalDirection;
+  state: SignalState;
+  id: string;
+}
+
+interface StreamKlineMessage {
+  stream: string;
+  data: {
+    s: string;
+    k: {
+      t: number;
+      T: number;
+      o: string;
+      h: string;
+      l: string;
+      c: string;
+      x: boolean;
+      i: string;
+    };
+  };
 }
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -76,6 +125,8 @@ app.innerHTML = `
       </a>
       <div class="top-actions">
         <span class="live-indicator"><i></i> PUBLIC MARKET DATA</span>
+        <span id="connection-badge" class="connection-badge offline" role="status" aria-live="polite"><i></i><b>Offline</b></span>
+        <span class="last-stream-update">Last update <b id="last-stream-update">—</b></span>
         <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch to light theme" title="Toggle light and dark theme">☼</button>
         <button id="refresh-button" class="button button-primary" type="button"><span aria-hidden="true">↻</span> Refresh scan</button>
       </div>
@@ -111,6 +162,11 @@ app.innerHTML = `
         </div>
       </details>
 
+      <section class="data-panel live-panel" aria-labelledby="live-title">
+        <div class="section-heading"><div><p class="eyebrow">STREAMING BINANCE CANDLES</p><h2 id="live-title">Live signals</h2></div><span id="live-summary" class="muted" role="status" aria-live="polite">Waiting for WebSocket data</span></div>
+        <div id="live-signal-feed" class="live-signal-feed"><div class="empty-state">Developing warnings appear near candle close; confirmed signals appear after a candle closes.</div></div>
+      </section>
+
       <section class="rule-panel" aria-labelledby="rule-title">
         <div class="rule-icon" aria-hidden="true">↗</div>
         <div><h2 id="rule-title">How we recommend a candle size</h2><p>Based on 1m ATR as % of price: <b>High</b> volatility (&gt; ${ATR_HIGH_THRESHOLD_PERCENT}%) → 1m · <b>Medium</b> (${ATR_LOW_THRESHOLD_PERCENT}%–${ATR_HIGH_THRESHOLD_PERCENT}%) → 5m · <b>Low</b> (&lt; ${ATR_LOW_THRESHOLD_PERCENT}%) → 15m. This is a rule of thumb, not a forecast.</p></div>
@@ -129,8 +185,11 @@ app.innerHTML = `
         <label class="select-control">Sort by<select id="sort-select" aria-label="Sort pairs"><option value="volatility">Volatility</option><option value="rsi">RSI</option><option value="win-rate">Win rate</option></select></label>
         <label class="select-control">Volatility<select id="volatility-filter" aria-label="Filter by volatility"><option value="all">All levels</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option></select></label>
         <div class="payout-control"><label class="number-control">Payout % <button class="term-tip" type="button" aria-label="What is payout?" title="The percentage return on a winning outcome. Break-even is 100 / (100 + payout) × 100.">?</button><input id="payout-input" type="number" min="0" max="1000" step="1" value="${DEFAULT_PAYOUT_PERCENT}" aria-label="Binary payout percentage" title="Enter the payout percentage to update the break-even calculation."></label><span id="payout-summary" class="payout-explainer" aria-live="polite">You need to win about 55.6% of outcomes to break even at 80%.</span></div>
+        <label class="select-control">Early warning<select id="early-warning" aria-label="Early warning lead time"><option value="${DEFAULT_EARLY_WARNING_MINUTES}">${DEFAULT_EARLY_WARNING_MINUTES} minutes</option><option value="5">5 minutes</option></select></label>
         <label class="number-control">Pairs to analyze<input id="pair-limit" type="number" min="1" max="100" step="1" value="${DEFAULT_PAIR_LIMIT}" aria-label="Number of top pairs to analyze" title="Analyze this many of the pairs with the largest 24-hour range"></label>
         <label class="toggle-control"><input id="ema-toggle" type="checkbox" checked aria-label="Require EMA 50 trend alignment"><span class="toggle-track"></span><span>EMA(50) filter</span><button class="term-tip" type="button" aria-label="About the EMA filter" title="When on, Bullish signals require price above EMA(50); Bearish signals require price below it.">?</button></label>
+        <label class="toggle-control notification-toggle"><input id="notification-toggle" type="checkbox" aria-label="Enable browser notifications"><span class="toggle-track"></span><span>Browser notifications</span></label>
+        <p class="early-warning-note">An early warning is based on a candle that is still forming. It can change before close. Check the early-warning win rate before relying on it.</p>
       </section>
 
       <div id="error-state" class="error-state" role="alert" hidden></div>
@@ -151,9 +210,9 @@ app.innerHTML = `
           <div id="signal-feed" class="signal-feed"><div class="empty-state">Signals will appear here when the RSI rules are met.</div></div>
         </section>
         <section class="data-panel backtest-panel" aria-labelledby="backtest-title">
-          <div class="section-heading"><div><p class="eyebrow">UP TO 500 CLOSED CANDLES · NEXT-CANDLE CHECK</p><h2 id="backtest-title">Past results</h2></div><span class="muted">pair · candle size</span></div>
+          <div class="section-heading"><div><p class="eyebrow">UP TO 500 CANDLES · CLOSE-TO-CLOSE REPLAY</p><h2 id="backtest-title">Past results by signal state</h2></div><span class="muted">pair · candle size</span></div>
           <div class="warning-note"><span aria-hidden="true">⚠</span><p><strong>Historical results do not predict future results.</strong> Backtests are simplified and exclude fees, slippage, and execution.</p></div>
-          <div class="table-wrap compact-table"><table><thead><tr><th scope="col">PAIR</th><th scope="col">TIMEFRAME</th><th scope="col">WIN RATE</th><th scope="col">SAMPLE</th><th scope="col">VS BREAK-EVEN</th></tr></thead><tbody id="backtest-body"><tr><td colspan="5" class="empty-cell">Backtest results appear after scanning.</td></tr></tbody></table></div>
+          <div class="table-wrap compact-table"><table><thead><tr><th scope="col">PAIR</th><th scope="col">TIMEFRAME</th><th scope="col">CONFIRMED</th><th scope="col">EARLY WARNING</th><th scope="col">CANCELLED WARNINGS</th><th scope="col">BREAK-EVEN</th></tr></thead><tbody id="backtest-body"><tr><td colspan="6" class="empty-cell">Backtest results appear after scanning.</td></tr></tbody></table></div>
         </section>
       </div>
       <footer><span>Market data: Binance public spot API</span><span>Analysis only · No broker connections · No trades placed</span></footer>
@@ -162,6 +221,10 @@ app.innerHTML = `
 
 const elements = {
   status: document.querySelector<HTMLElement>("#scan-status")!,
+  connection: document.querySelector<HTMLElement>("#connection-badge")!,
+  lastStreamUpdate: document.querySelector<HTMLElement>("#last-stream-update")!,
+  liveSummary: document.querySelector<HTMLElement>("#live-summary")!,
+  liveFeed: document.querySelector<HTMLElement>("#live-signal-feed")!,
   error: document.querySelector<HTMLElement>("#error-state")!,
   updated: document.querySelector<HTMLElement>("#last-updated")!,
   analyzed: document.querySelector<HTMLElement>("#analyzed-count")!,
@@ -180,6 +243,8 @@ const elements = {
   sort: document.querySelector<HTMLSelectElement>("#sort-select")!,
   filter: document.querySelector<HTMLSelectElement>("#volatility-filter")!,
   payout: document.querySelector<HTMLInputElement>("#payout-input")!,
+  earlyWarning: document.querySelector<HTMLSelectElement>("#early-warning")!,
+  notifications: document.querySelector<HTMLInputElement>("#notification-toggle")!,
   pairLimit: document.querySelector<HTMLInputElement>("#pair-limit")!,
   ema: document.querySelector<HTMLInputElement>("#ema-toggle")!,
   theme: document.querySelector<HTMLButtonElement>("#theme-toggle")!,
@@ -190,6 +255,19 @@ let universeCount = 0;
 let isScanning = false;
 let storageWarning: string | null = null;
 let recentSignals = loadSignals();
+const candleBuffers = new Map<string, CandleBuffer>();
+const activeSignals = new Map<string, ActiveSignal>();
+const lastPairUpdate = new Map<string, number>();
+const pendingPairUpdates = new Map<string, number>();
+const sockets: WebSocket[] = [];
+let socketStates: boolean[] = [];
+const reconnectAttempts: number[] = [];
+const connectionTimers: number[] = [];
+let selectedSymbols: string[] = [];
+let websocketGeneration = 0;
+let streamLastReceivedAt = 0;
+let notificationPermission: NotificationPermission =
+  "Notification" in window ? Notification.permission : "denied";
 
 function loadSignals(): SignalRecord[] {
   try {
@@ -197,7 +275,13 @@ function loadSignals(): SignalRecord[] {
     if (!stored) return [];
     const parsed: unknown = JSON.parse(stored);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isSignalRecord).slice(0, SIGNAL_STORAGE_LIMIT);
+    return parsed
+      .filter(isSignalRecord)
+      .map((signal) => ({
+        ...signal,
+        state: signal.state ?? "CONFIRMED",
+      }))
+      .slice(0, SIGNAL_STORAGE_LIMIT);
   } catch {
     storageWarning =
       "Recent signals could not be read from this browser's local storage.";
@@ -214,6 +298,10 @@ function isSignalRecord(value: unknown): value is SignalRecord {
     typeof record.timeframe === "string" &&
     TIMEFRAMES.includes(record.timeframe as Timeframe) &&
     (record.direction === "CALL" || record.direction === "PUT") &&
+    (record.state === undefined ||
+      record.state === "DEVELOPING" ||
+      record.state === "CONFIRMED" ||
+      record.state === "CANCELLED") &&
     typeof record.rsi === "number" &&
     Number.isFinite(record.rsi) &&
     typeof record.atrPercent === "number" &&
@@ -253,8 +341,18 @@ function getPayout(): number {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_PAYOUT_PERCENT;
 }
 
-function calculateFrame(candles: Candle[], requireEma: boolean): TimeframeAnalysis {
-  const closed = candles.slice(0, -1);
+function bufferKey(symbol: string, timeframe: Timeframe): string {
+  return `${symbol}:${timeframe}`;
+}
+
+function calculateFrame(
+  candles: Candle[],
+  requireEma: boolean,
+  timeframe: Timeframe,
+  oneMinuteCandles: Candle[],
+  existing?: TimeframeAnalysis,
+): TimeframeAnalysis {
+  const closed = candles.filter((candle) => candle.closed);
   const closes = closed.map((candle) => candle.close);
   const highs = closed.map((candle) => candle.high);
   const lows = closed.map((candle) => candle.low);
@@ -273,8 +371,25 @@ function calculateFrame(candles: Candle[], requireEma: boolean): TimeframeAnalys
     direction = null;
   }
 
+  const lastClosedOpenTime = closed[closed.length - 1]?.openTime;
+  const oneMinuteLastOpenTime =
+    oneMinuteCandles[oneMinuteCandles.length - 1]?.openTime ?? null;
+  const reuseConfirmedBacktest =
+    existing !== undefined &&
+    existing.candles[existing.candles.length - 1]?.openTime ===
+      lastClosedOpenTime &&
+    existing.backtestEmaFilter === requireEma;
+  const leadMinutes: 2 | 5 =
+    Number(elements.earlyWarning.value) === 5 ? 5 : 2;
+  const reuseDevelopingBacktest =
+    reuseConfirmedBacktest &&
+    existing.oneMinuteLastOpenTime === oneMinuteLastOpenTime &&
+    existing.developingEmaFilter === requireEma &&
+    existing.developingLeadMinutes === leadMinutes;
+
   return {
     candles: closed,
+    oneMinuteLastOpenTime,
     rsi: frameRsi,
     atrPercent:
       frameAtr !== null && lastClose !== null && lastClose > 0
@@ -282,7 +397,21 @@ function calculateFrame(candles: Candle[], requireEma: boolean): TimeframeAnalys
         : null,
     ema: frameEma,
     direction,
-    backtest: backtestSignals(highs, lows, closes, requireEma),
+    backtest: reuseConfirmedBacktest
+      ? existing.backtest
+      : backtestSignals(highs, lows, closes, requireEma),
+    backtestEmaFilter: requireEma,
+    developingBacktest: reuseDevelopingBacktest
+      ? existing.developingBacktest
+      : replayDevelopingSignals(
+          closed,
+          oneMinuteCandles,
+          timeframe,
+          leadMinutes,
+          requireEma,
+        ),
+    developingEmaFilter: requireEma,
+    developingLeadMinutes: leadMinutes,
   };
 }
 
@@ -301,6 +430,218 @@ function storeSignal(signal: SignalRecord): void {
   }
 }
 
+function currentSignalRecord(id: string): SignalRecord | undefined {
+  return recentSignals.find((signal) => signal.id === id);
+}
+
+function notifyDevelopingSignal(signal: SignalRecord): void {
+  if (
+    !elements.notifications.checked ||
+    notificationPermission !== "granted" ||
+    !("Notification" in window)
+  ) {
+    return;
+  }
+  const direction = signal.direction === "CALL" ? "Bullish" : "Bearish";
+  new Notification(`${direction} developing · ${signal.symbol}`, {
+    body: `${signal.timeframe} candle · RSI ${signal.rsi.toFixed(1)} · closes soon`,
+    tag: signal.id,
+  });
+}
+
+function buildSignalRecord(
+  pair: PairAnalysis,
+  timeframe: Timeframe,
+  candle: Candle,
+  id: string,
+  direction: SignalDirection,
+  state: SignalState,
+  signalRsi: number,
+  signalEma: number | null,
+  entryPrice: number,
+): SignalRecord {
+  const frame = pair.frames[timeframe];
+  return {
+    id,
+    symbol: pair.ticker.symbol,
+    timeframe,
+    direction,
+    state,
+    rsi: signalRsi,
+    atrPercent: frame?.atrPercent ?? 0,
+    entryPrice,
+    generatedAt: currentSignalRecord(id)?.generatedAt ?? new Date().toISOString(),
+    emaFilterEnabled: elements.ema.checked,
+    priceAboveEma: signalEma === null ? null : entryPrice > signalEma,
+    closeTime: candle.closeTime,
+  };
+}
+
+function updateSignalState(
+  pair: PairAnalysis,
+  timeframe: Timeframe,
+  candle: Candle,
+  transition: SignalTransition,
+  signalRsi: number | null,
+  signalEma: number | null,
+  entryPrice: number,
+  notify: boolean,
+  reuseId?: string,
+): SignalRecord | undefined {
+  if (!transition.state || !transition.direction) return undefined;
+  const baseId = `${pair.ticker.symbol}:${timeframe}:${candle.openTime}:${transition.direction}`;
+  const previousBase = currentSignalRecord(baseId);
+  const id =
+    reuseId ??
+    (previousBase?.state === "CANCELLED" && transition.state === "DEVELOPING"
+      ? `${baseId}:${Date.now()}`
+      : baseId);
+  const existing = currentSignalRecord(id);
+  const wasDeveloping = existing?.state === "DEVELOPING";
+  const signal = buildSignalRecord(
+    pair,
+    timeframe,
+    candle,
+    id,
+    transition.direction,
+    transition.state,
+    signalRsi ?? existing?.rsi ?? 50,
+    signalEma,
+    existing?.entryPrice ?? entryPrice,
+  );
+  storeSignal(signal);
+  if (notify && transition.state === "DEVELOPING" && !wasDeveloping) {
+    notifyDevelopingSignal(signal);
+  }
+  return signal;
+}
+
+function calculateDirection(
+  closed: Candle[],
+  forming: Candle | null,
+  requireEma: boolean,
+): { direction: SignalDirection | null; value: number | null; average: number | null } {
+  const closes = closed.map((candle) => candle.close);
+  if (forming) closes.push(forming.close);
+  const value = rsi(closes, RSI_PERIOD);
+  const average = ema(closes, EMA_PERIOD);
+  let direction = signalDirection(value);
+  const currentPrice = forming?.close ?? closed[closed.length - 1]?.close;
+
+  if (
+    requireEma &&
+    (average === null ||
+      currentPrice === undefined ||
+      (direction === "CALL" && currentPrice <= average) ||
+      (direction === "PUT" && currentPrice >= average))
+  ) {
+    direction = null;
+  }
+  return { direction, value, average };
+}
+
+function evaluateSignalState(
+  pair: PairAnalysis,
+  timeframe: Timeframe,
+  notify: boolean,
+): void {
+  const buffer = candleBuffers.get(bufferKey(pair.ticker.symbol, timeframe));
+  if (!buffer) return;
+  const closed = buffer.getClosed();
+  const forming = buffer.getForming();
+  const candle = forming ?? closed[closed.length - 1];
+  if (!candle) return;
+
+  const key = bufferKey(pair.ticker.symbol, timeframe);
+  const tracked = activeSignals.get(key);
+  const previous =
+    tracked?.candleOpenTime === candle.openTime && tracked.state === "DEVELOPING"
+      ? { state: tracked.state, direction: tracked.direction }
+      : null;
+  const inWarningWindow =
+    forming !== null &&
+    isWithinEarlyWarningWindow(
+      forming.closeTime,
+      Date.now(),
+      Number(elements.earlyWarning.value) === 5 ? 5 : 2,
+    );
+  const computed = calculateDirection(closed, forming, elements.ema.checked);
+  const currentDirection =
+    forming && !inWarningWindow ? null : computed.direction;
+  const transition = transitionSignalState(
+    previous,
+    currentDirection,
+    forming === null,
+  );
+
+  if (transition.state === "CANCELLED" && tracked) {
+    const oldRecord = currentSignalRecord(tracked.id);
+    if (oldRecord) storeSignal({ ...oldRecord, state: "CANCELLED" });
+    activeSignals.set(key, {
+      ...tracked,
+      state: "CANCELLED",
+    });
+    if (currentDirection && forming && inWarningWindow) {
+      const next = transitionSignalState(null, currentDirection, false);
+      const nextSignal = updateSignalState(
+        pair,
+        timeframe,
+        forming,
+        next,
+        computed.value,
+        computed.average,
+        forming.close,
+        notify,
+      );
+      if (next.direction && next.state && nextSignal) {
+        activeSignals.set(key, {
+          candleOpenTime: candle.openTime,
+          direction: next.direction,
+          state: next.state,
+          id: nextSignal.id,
+        });
+      }
+    }
+    return;
+  }
+
+  if (transition.state && transition.direction) {
+    const signal = updateSignalState(
+      pair,
+      timeframe,
+      candle,
+      transition,
+      computed.value,
+      computed.average,
+      forming?.close ?? candle.close,
+      notify,
+      tracked?.candleOpenTime === candle.openTime &&
+        tracked.direction === transition.direction &&
+        tracked.state === "DEVELOPING"
+        ? tracked.id
+        : undefined,
+    );
+    if (signal) {
+      activeSignals.set(key, {
+        candleOpenTime: candle.openTime,
+        direction: transition.direction,
+        state: transition.state,
+        id: signal.id,
+      });
+    }
+  } else if (tracked?.state === "DEVELOPING") {
+    const oldRecord = currentSignalRecord(tracked.id);
+    if (oldRecord) storeSignal({ ...oldRecord, state: "CANCELLED" });
+    activeSignals.set(key, { ...tracked, state: "CANCELLED" });
+  } else if (
+    tracked?.state === "CONFIRMED" &&
+    tracked.candleOpenTime !== candle.openTime &&
+    forming === null
+  ) {
+    activeSignals.delete(key);
+  }
+}
+
 function addNewSignals(analyses: PairAnalysis[]): void {
   const currentIds = new Set(recentSignals.map((signal) => signal.id));
   const candidates: SignalRecord[] = [];
@@ -314,12 +655,19 @@ function addNewSignals(analyses: PairAnalysis[]): void {
         continue;
       }
       const id = `${pair.ticker.symbol}:${timeframe}:${candle.openTime}:${frame.direction}`;
+      activeSignals.set(bufferKey(pair.ticker.symbol, timeframe), {
+        candleOpenTime: candle.openTime,
+        direction: frame.direction,
+        state: "CONFIRMED",
+        id,
+      });
       if (currentIds.has(id)) continue;
       candidates.push({
         id,
         symbol: pair.ticker.symbol,
         timeframe,
         direction: frame.direction,
+        state: "CONFIRMED",
         rsi: frame.rsi,
         atrPercent: frame.atrPercent,
         entryPrice: candle.close,
@@ -327,6 +675,7 @@ function addNewSignals(analyses: PairAnalysis[]): void {
         emaFilterEnabled: elements.ema.checked,
         priceAboveEma:
           frame.ema === null ? null : candle.close > frame.ema,
+        closeTime: candle.closeTime,
       });
       currentIds.add(id);
     }
@@ -456,14 +805,28 @@ function renderPairs(): void {
                 ? "RSI is unavailable: not enough closed candles."
                 : `RSI ${rsiValue.toFixed(1)}: ${rsiValue <= RSI_OVERSOLD ? `at or below ${RSI_OVERSOLD}, which is oversold and meets the bullish rule` : rsiValue >= RSI_OVERBOUGHT ? `at or above ${RSI_OVERBOUGHT}, which is overbought and meets the bearish rule` : "between the signal thresholds, so there is no RSI signal"}.`;
 
-            return `<tr class="${rowTone}">
+            const active =
+              pair.recommendation
+                ? activeSignals.get(bufferKey(pair.ticker.symbol, pair.recommendation))
+                : undefined;
+            const displayedDirection =
+              active && active.state !== "CANCELLED"
+                ? active.direction
+                : signal;
+            const displayedStatus =
+              active?.state === "DEVELOPING"
+                ? `${active.direction === "CALL" ? "Bullish" : "Bearish"} signal developing`
+                : active?.state === "CONFIRMED"
+                  ? `${active.direction === "CALL" ? "Bullish" : "Bearish"} signal active`
+                  : status;
+            return `<tr class="${displayedDirection ? displayedDirection === "CALL" ? "row-bullish" : "row-bearish" : rowTone}" data-pair="${escapeHtml(pair.ticker.symbol)}">
               <td><span class="pair-cell"><strong>${escapeHtml(pair.ticker.symbol.replace(/USDT$/, ""))}</strong><small>/ USDT</small></span></td>
-              <td class="price-cell" tabindex="0" title="Latest price from Binance public market data.">${formatPrice(pair.ticker.last)}</td>
+              <td class="price-cell realtime-price" tabindex="0" title="Latest Binance candle price.">${formatPrice(pair.ticker.last)}</td>
               <td><strong class="change-value ${pair.ticker.changePercent >= 0 ? "positive-change" : "negative-change"}" tabindex="0" aria-label="${priceChangeTitle}" title="${priceChangeTitle}">${pair.ticker.changePercent >= 0 ? "▲" : "▼"} ${Math.abs(pair.ticker.changePercent).toFixed(2)}%</strong></td>
               <td><span class="volatility-badge ${frameAtr === null || frameAtr === undefined ? "unknown" : pair.volatility.toLowerCase()}" tabindex="0" title="${escapeHtml(volatilityDescription)}">${hasData ? pair.volatility : "Unknown"}</span><span class="volatility-detail" tabindex="0" title="${escapeHtml(`${atrDetails} · 24-hour range ${pair.ticker.rangePercent.toFixed(2)}%`)}">${frameAtr === null || frameAtr === undefined ? "ATR% unavailable" : `1m ATR ${frameAtr.toFixed(3)}%`}</span><details class="atr-details"><summary>ATR% details</summary><div>${atrDetailMarkup}</div></details></td>
               <td>${pair.recommendation ? `<span class="timeframe-chip" tabindex="0" title="Recommended candle length based on 1m volatility">${pair.recommendation}</span>` : `<span class="muted" title="Not enough candle data to recommend a timeframe">Not available</span>`}</td>
-              <td>${rsiValue === null ? `<span class="muted" tabindex="0" title="${rsiTitle}">—</span>` : `<span class="rsi-value ${rsiValue <= RSI_OVERSOLD ? "bullish-text" : rsiValue >= RSI_OVERBOUGHT ? "bearish-text" : ""}" tabindex="0" title="${rsiTitle}">${rsiValue.toFixed(1)}</span><button class="number-help" type="button" title="${rsiTitle}" aria-label="${rsiTitle}">?</button>`}</td>
-              <td>${signalMarkup(signal)}<span class="pair-status ${signal ? signal === "CALL" ? "bullish-text" : "bearish-text" : ""}">${status}</span></td>
+              <td class="realtime-rsi-cell">${rsiValue === null ? `<span class="muted" tabindex="0" title="${rsiTitle}">—</span>` : `<span class="rsi-value ${rsiValue <= RSI_OVERSOLD ? "bullish-text" : rsiValue >= RSI_OVERBOUGHT ? "bearish-text" : ""}" tabindex="0" title="${rsiTitle}">${rsiValue.toFixed(1)}</span><button class="number-help" type="button" title="${rsiTitle}" aria-label="${rsiTitle}">?</button>`}</td>
+              <td class="realtime-signal-cell">${signalMarkup(displayedDirection)}<span class="pair-status ${displayedDirection ? displayedDirection === "CALL" ? "bullish-text" : "bearish-text" : ""}">${displayedStatus}</span></td>
               <td>${hasWinRate ? `<span class="rate-value ${insufficient ? "insufficient-rate" : beats ? "positive" : "negative"}" tabindex="0" title="Historical win rate over ${sampleCount} signal${sampleCount === 1 ? "" : "s"}; one-candle-ahead replay.">${winRate.toFixed(1)}%</span>` : `<span class="muted" tabindex="0" title="No historical signals were found">—</span>`}${insufficient ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td>
               <td><span class="break-even-value" tabindex="0" title="At ${getPayout()}% payout, break-even is 100 / (100 + payout) × 100.">${breakEven.toFixed(1)}%</span></td>
               <td><span class="sample-count ${insufficient ? "insufficient-sample" : ""}" tabindex="0" title="Number of historical signals counted in the win rate.">${sampleCount}</span>${insufficient ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td>
@@ -483,6 +846,112 @@ function renderPairs(): void {
   );
 }
 
+function updateSummarySignalCounts(): void {
+  const directions = pairs.map((pair) => {
+    if (!pair.recommendation) return null;
+    const active = activeSignals.get(
+      bufferKey(pair.ticker.symbol, pair.recommendation),
+    );
+    return active && active.state !== "CANCELLED"
+      ? active.direction
+      : pair.frames[pair.recommendation]?.direction ?? null;
+  });
+  elements.bullish.textContent = String(
+    directions.filter((direction) => direction === "CALL").length,
+  );
+  elements.bearish.textContent = String(
+    directions.filter((direction) => direction === "PUT").length,
+  );
+}
+
+function renderLiveSignals(): void {
+  const activeIds = new Set(
+    Array.from(activeSignals.values())
+      .filter(
+        (signal) =>
+          signal.state === "DEVELOPING" || signal.state === "CONFIRMED",
+      )
+      .map((signal) => signal.id),
+  );
+  const live = recentSignals
+    .filter(
+      (signal) =>
+        activeIds.has(signal.id) &&
+        (signal.state === "DEVELOPING" || signal.state === "CONFIRMED"),
+    )
+    .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
+    .slice(0, 24);
+  elements.liveFeed.innerHTML = live.length
+    ? live
+        .map((signal) => {
+          const developing = signal.state === "DEVELOPING";
+          const remaining = Math.max(0, (signal.closeTime ?? 0) - Date.now());
+          const directionText =
+            signal.direction === "CALL" ? "Bullish · CALL" : "Bearish · PUT";
+          return `<article class="live-signal-card ${signal.direction === "CALL" ? "bullish" : "bearish"}">
+            <div class="live-card-heading"><strong>${escapeHtml(signal.symbol)}</strong><span>${escapeHtml(signal.timeframe)}</span></div>
+            <p class="signal-state">${developing ? `${directionText} developing, closes in ${Math.floor(remaining / 60_000)}:${String(Math.floor((remaining % 60_000) / 1_000)).padStart(2, "0")}` : `${directionText} · Confirmed`}</p>
+            <dl><div><dt>RSI</dt><dd>${signal.rsi.toFixed(1)}</dd></div><div><dt>Entry price</dt><dd>${formatPrice(signal.entryPrice)}</dd></div><div><dt>State</dt><dd>${developing ? "Developing" : "Confirmed"}</dd></div></dl>
+            <p class="why-signal">${escapeHtml(explainSignal(signal))}</p>
+          </article>`;
+        })
+        .join("")
+    : `<p class="empty-state">No developing or confirmed signals at the moment.</p>`;
+}
+
+function updateConnectionStatus(status: "Live" | "Reconnecting" | "Offline"): void {
+  elements.connection.querySelector("b")!.textContent = status;
+  elements.connection.className = `connection-badge ${status.toLowerCase()}`;
+  elements.connection.setAttribute("aria-label", `Market data connection: ${status}`);
+}
+
+function updatePairRow(pair: PairAnalysis): void {
+  const row = Array.from(elements.pairsBody.querySelectorAll<HTMLTableRowElement>("tr[data-pair]"))
+    .find((candidate) => candidate.dataset.pair === pair.ticker.symbol);
+  if (!row) return;
+  const timeframe = pair.recommendation;
+  const frame = timeframe ? pair.frames[timeframe] : undefined;
+  const active = timeframe
+    ? activeSignals.get(bufferKey(pair.ticker.symbol, timeframe))
+    : undefined;
+  const direction =
+    active && active.state !== "CANCELLED" ? active.direction : frame?.direction ?? null;
+  row.className = direction
+    ? direction === "CALL"
+      ? "row-bullish"
+      : "row-bearish"
+    : "row-neutral";
+  const priceCell = row.querySelector<HTMLElement>(".realtime-price");
+  if (priceCell) priceCell.textContent = formatPrice(pair.ticker.last);
+
+  const rsiCell = row.querySelector<HTMLElement>(".realtime-rsi-cell");
+  if (rsiCell) {
+    const value = frame?.rsi;
+    const title =
+      value === null || value === undefined
+        ? "Not enough closed candles to calculate RSI."
+        : `RSI ${value.toFixed(1)}: ${value <= RSI_OVERSOLD ? "below 30 suggests an oversold market." : value >= RSI_OVERBOUGHT ? "above 70 suggests an overbought market." : "between the signal thresholds."}`;
+    rsiCell.innerHTML =
+      value === null || value === undefined
+        ? `<span class="muted" title="${escapeHtml(title)}">—</span>`
+        : `<span class="rsi-value ${value <= RSI_OVERSOLD ? "bullish-text" : value >= RSI_OVERBOUGHT ? "bearish-text" : ""}" title="${escapeHtml(title)}">${value.toFixed(1)}</span><button class="number-help" type="button" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">?</button>`;
+  }
+  const signalCell = row.querySelector<HTMLElement>(".realtime-signal-cell");
+  if (signalCell) {
+    const stateText =
+      active?.state === "DEVELOPING"
+        ? `${active.direction === "CALL" ? "Bullish" : "Bearish"} signal developing`
+        : active?.state === "CONFIRMED"
+          ? `${active.direction === "CALL" ? "Bullish" : "Bearish"} signal active`
+          : direction
+            ? `${direction === "CALL" ? "Bullish" : "Bearish"} signal active`
+            : frame?.rsi === null || frame?.rsi === undefined
+              ? "Not enough data"
+              : "Waiting for signal";
+    signalCell.innerHTML = `${signalMarkup(direction)}<span class="pair-status ${direction ? direction === "CALL" ? "bullish-text" : "bearish-text" : ""}">${stateText}</span>`;
+  }
+}
+
 function renderFeed(): void {
   elements.feedCount.textContent = `${recentSignals.length} saved`;
   elements.feed.innerHTML =
@@ -499,8 +968,14 @@ function renderFeed(): void {
                 ? "Historical rate unavailable"
                 : `Historical ${historical.winRate.toFixed(1)}% · n=${historical.samples}${historical.samples < 30 ? " · insufficient sample" : ""}`;
             const why = explainSignal(signal);
+            const stateLabel =
+              signal.state === "DEVELOPING"
+                ? "Developing"
+                : signal.state === "CANCELLED"
+                  ? "Cancelled"
+                  : "Confirmed";
             return `<article class="feed-card">
-              ${signalMarkup(signal.direction, "feed-direction")}
+              ${signalMarkup(signal.direction, "feed-direction")}<span class="feed-state ${signal.state.toLowerCase()}">${stateLabel}</span>
               <div class="feed-main"><strong>${escapeHtml(signal.symbol.replace(/USDT$/, ""))}<small>/ USDT</small></strong><span title="Suggested candle length for this signal; not a guaranteed expiry.">${signal.timeframe} suggested candle timeframe · RSI ${signal.rsi.toFixed(1)}</span><span class="feed-why"><b>Why this signal?</b> ${why}</span><span class="feed-history" title="${historicalText}">${historicalText}</span></div>
               <div class="feed-meta"><strong title="Entry price when this signal was generated.">${formatPrice(signal.entryPrice)}</strong><span title="Time when the signal was first detected.">${new Date(signal.generatedAt).toLocaleString()}</span></div>
               <span class="feed-atr" title="ATR(14) as a percentage of the last closed price.">Volatility ${signal.atrPercent.toFixed(3)}%</span>
@@ -514,17 +989,24 @@ function renderBacktest(): void {
   const breakEven = breakEvenWinRate(getPayout());
   elements.backtestBody.innerHTML =
     visible.length === 0
-      ? `<tr><td colspan="5" class="empty-cell">No pairs match these filters.</td></tr>`
+      ? `<tr><td colspan="6" class="empty-cell">No pairs match these filters.</td></tr>`
       : visible
           .flatMap((pair) =>
             TIMEFRAMES.map((timeframe) => {
-              const result = pair.frames[timeframe]?.backtest;
-              const winRate = result?.winRate ?? null;
-              if (!result || result.samples === 0 || winRate === null) {
-                return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td>—<span class="sample-warning">Insufficient sample</span></td><td>0</td><td class="muted">No signals</td></tr>`;
-              }
-              const above = winRate >= breakEven;
-              return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td><strong class="${result.samples < 30 ? "insufficient-rate" : above ? "positive" : "negative"}" title="Historical win rate; one candle ahead.">${winRate.toFixed(1)}%</strong></td><td>${result.samples}${result.samples < 30 ? `<span class="sample-warning">Insufficient sample</span>` : ""}</td><td><span class="edge-badge ${result.samples < 30 ? "unknown" : above ? "above" : "below"}">${result.samples < 30 ? "Insufficient sample" : above ? "Above" : "Below"} ${breakEven.toFixed(1)}%</span></td></tr>`;
+              const frame = pair.frames[timeframe];
+              if (!frame) return "";
+              const confirmed = frame.backtest;
+              const early = frame.developingBacktest;
+              const rateCell = (
+                rate: number | null,
+                samples: number,
+                title: string,
+              ): string => {
+                const insufficient = samples < 30 || rate === null;
+                const above = rate !== null && rate >= breakEven;
+                return `<span class="backtest-rate ${insufficient ? "insufficient-rate" : above ? "positive" : "negative"}" title="${title}">${rate === null ? "—" : `${rate.toFixed(1)}%`} · n=${samples}</span>${insufficient ? `<span class="sample-warning">Insufficient sample</span>` : ""}`;
+              };
+              return `<tr><td>${escapeHtml(pair.ticker.symbol)}</td><td>${timeframe}</td><td>${rateCell(confirmed.winRate, confirmed.samples, "Confirmed signals: rule replayed on closed candles; outcome is the next closed candle.")}</td><td>${rateCell(early.winRate, early.samples, "Early warnings: replayed at the selected lead time using available 1-minute candle snapshots.")}</td><td>${early.cancelledPercent === null ? "—" : `${early.cancelledPercent.toFixed(1)}% · ${early.cancelled}/${early.samples}`}</td><td><span class="break-even-value">${breakEven.toFixed(1)}%</span></td></tr>`;
             }),
           )
           .join("");
@@ -548,6 +1030,7 @@ function renderAll(): void {
           .join("");
   renderPairs();
   renderFeed();
+  renderLiveSignals();
   renderBacktest();
 }
 
@@ -560,6 +1043,245 @@ function renderSkeleton(): void {
     { length: 8 },
     () => `<tr><td colspan="10"><div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div></td></tr>`,
   ).join("");
+}
+
+function schedulePairUpdate(pair: PairAnalysis, historicalChanged: boolean): void {
+  const symbol = pair.ticker.symbol;
+  const now = Date.now();
+  const elapsed = now - (lastPairUpdate.get(symbol) ?? 0);
+  const update = (): void => {
+    pendingPairUpdates.delete(symbol);
+    lastPairUpdate.set(symbol, Date.now());
+    updatePairRow(pair);
+    updateSummarySignalCounts();
+    renderLiveSignals();
+    renderFeed();
+    if (historicalChanged) renderBacktest();
+    const developingCount = recentSignals.filter(
+      (signal) => signal.state === "DEVELOPING",
+    ).length;
+    elements.liveSummary.textContent = `${developingCount} developing · live updates`;
+  };
+  if (elapsed >= UI_UPDATE_INTERVAL_MS) {
+    const existing = pendingPairUpdates.get(symbol);
+    if (existing !== undefined) window.clearTimeout(existing);
+    update();
+    return;
+  }
+  if (!pendingPairUpdates.has(symbol)) {
+    const timer = window.setTimeout(update, UI_UPDATE_INTERVAL_MS - elapsed);
+    pendingPairUpdates.set(symbol, timer);
+  }
+}
+
+function applyCandleUpdate(
+  symbol: string,
+  timeframe: Timeframe,
+  candle: Candle,
+): void {
+  const pair = pairs.find((candidate) => candidate.ticker.symbol === symbol);
+  const key = bufferKey(symbol, timeframe);
+  const buffer = candleBuffers.get(key);
+  if (!pair || !buffer) return;
+  buffer.update(candle);
+
+  if (timeframe === "1m") pair.ticker.last = candle.close;
+  const oneMinute = candleBuffers.get(bufferKey(symbol, "1m"))?.getClosed() ?? [];
+  const previous = pair.frames[timeframe];
+  const updated = calculateFrame(
+    buffer.getClosed(),
+    elements.ema.checked,
+    timeframe,
+    oneMinute,
+    previous,
+  );
+  pair.frames[timeframe] = updated;
+
+  if (timeframe === "1m") {
+    const oneMinuteAtr = updated.atrPercent;
+    pair.recommendation =
+      oneMinuteAtr === null
+        ? null
+        : recommendTimeframe(
+            oneMinuteAtr,
+            ATR_LOW_THRESHOLD_PERCENT,
+            ATR_HIGH_THRESHOLD_PERCENT,
+          );
+    pair.volatility = volatilityFor(oneMinuteAtr);
+  }
+
+  const before = currentSignalRecord(
+    `${symbol}:${timeframe}:${candle.openTime}:CALL`,
+  );
+  evaluateSignalState(pair, timeframe, true);
+  const afterCall = currentSignalRecord(
+    `${symbol}:${timeframe}:${candle.openTime}:CALL`,
+  );
+  const afterPut = currentSignalRecord(
+    `${symbol}:${timeframe}:${candle.openTime}:PUT`,
+  );
+  const historicalChanged =
+    candle.closed &&
+    (previous?.candles[previous.candles.length - 1]?.openTime !==
+      updated.candles[updated.candles.length - 1]?.openTime ||
+      before?.state !== afterCall?.state ||
+      afterPut?.state === "CONFIRMED");
+  if (candle.closed) {
+    elements.updated.textContent = new Date().toLocaleTimeString();
+  }
+  schedulePairUpdate(pair, historicalChanged);
+}
+
+function reconnectBatch(index: number, generation: number): void {
+  if (generation !== websocketGeneration) return;
+  const old = sockets[index];
+  if (old) {
+    old.onclose = null;
+    old.onerror = null;
+    old.onmessage = null;
+    old.onopen = null;
+    old.close();
+  }
+  socketStates[index] = false;
+  connectStreamBatch(index, generation);
+}
+
+function connectStreamBatch(index: number, generation: number): void {
+  if (generation !== websocketGeneration) return;
+  const batch = streamBatches[index];
+  if (!batch?.length) return;
+  updateConnectionStatus("Reconnecting");
+  const url = `wss://stream.binance.com:9443/stream?streams=${batch.join("/")}`;
+  let socket: WebSocket;
+  try {
+    socket = new WebSocket(url);
+  } catch {
+    scheduleReconnect(index, generation);
+    return;
+  }
+  sockets[index] = socket;
+  socket.onopen = () => {
+    if (generation !== websocketGeneration) {
+      socket.close();
+      return;
+    }
+    socketStates[index] = true;
+    reconnectAttempts[index] = 0;
+    updateConnectionStatus(
+      socketStates.every(Boolean) ? "Live" : "Reconnecting",
+    );
+    if (connectionTimers[index] !== undefined) {
+      window.clearTimeout(connectionTimers[index]);
+    }
+    connectionTimers[index] = window.setTimeout(
+      () => reconnectBatch(index, generation),
+      WEBSOCKET_ROTATE_MS,
+    );
+  };
+  socket.onmessage = (event: MessageEvent<string>) => {
+    if (generation !== websocketGeneration || typeof event.data !== "string") return;
+    let message: StreamKlineMessage;
+    try {
+      message = JSON.parse(event.data) as StreamKlineMessage;
+    } catch {
+      return;
+    }
+    if (!message?.data?.k || !message.data.s) return;
+    const kline = message.data.k;
+    const timeframe = kline.i as Timeframe;
+    if (!TIMEFRAMES.includes(timeframe)) return;
+    const candle: Candle = {
+      openTime: Number(kline.t),
+      closeTime: Number(kline.T),
+      open: Number(kline.o),
+      high: Number(kline.h),
+      low: Number(kline.l),
+      close: Number(kline.c),
+      closed: kline.x,
+    };
+    if (
+      !Number.isFinite(candle.openTime) ||
+      !Number.isFinite(candle.closeTime) ||
+      !Number.isFinite(candle.close) ||
+      !Number.isFinite(candle.high) ||
+      !Number.isFinite(candle.low)
+    ) {
+      return;
+    }
+    streamLastReceivedAt = Date.now();
+    elements.lastStreamUpdate.textContent = new Date(streamLastReceivedAt).toLocaleTimeString();
+    applyCandleUpdate(message.data.s, timeframe, candle);
+  };
+  socket.onerror = () => socket.close();
+  socket.onclose = () => {
+    if (generation !== websocketGeneration) return;
+    socketStates[index] = false;
+    updateConnectionStatus(socketStates.some(Boolean) ? "Reconnecting" : "Offline");
+    scheduleReconnect(index, generation);
+  };
+}
+
+function scheduleReconnect(index: number, generation: number): void {
+  if (generation !== websocketGeneration) return;
+  const attempt = reconnectAttempts[index] ?? 0;
+  const delay = Math.min(
+    WEBSOCKET_RECONNECT_BASE_MS * 2 ** attempt,
+    WEBSOCKET_RECONNECT_MAX_MS,
+  );
+  reconnectAttempts[index] = attempt + 1;
+  updateConnectionStatus("Reconnecting");
+  elements.liveSummary.textContent = `Reconnecting · retry in ${Math.ceil(delay / 1000)}s`;
+  if (connectionTimers[index] !== undefined) {
+    window.clearTimeout(connectionTimers[index]);
+  }
+  connectionTimers[index] = window.setTimeout(
+    () => connectStreamBatch(index, generation),
+    delay,
+  );
+}
+
+let streamBatches: string[][] = [];
+function startWebSockets(symbols: string[]): void {
+  if (
+    symbols.length === selectedSymbols.length &&
+    symbols.every((symbol, index) => symbol === selectedSymbols[index]) &&
+    sockets.length > 0
+  ) {
+    return;
+  }
+  websocketGeneration += 1;
+  const generation = websocketGeneration;
+  for (const timer of connectionTimers) window.clearTimeout(timer);
+  for (const socket of sockets) {
+    socket.onclose = null;
+    socket.close();
+  }
+  sockets.length = 0;
+  connectionTimers.length = 0;
+  reconnectAttempts.length = 0;
+  selectedSymbols = [...symbols];
+  socketStates = [];
+  const streams = symbols.flatMap((symbol) =>
+    TIMEFRAMES.map(
+      (timeframe) => `${symbol.toLowerCase()}@kline_${timeframe}`,
+    ),
+  );
+  streamBatches = [];
+  for (let start = 0; start < streams.length; start += WEBSOCKET_MAX_STREAMS) {
+    streamBatches.push(streams.slice(start, start + WEBSOCKET_MAX_STREAMS));
+  }
+  if (streamBatches.length === 0) {
+    updateConnectionStatus("Offline");
+    return;
+  }
+  if (!("WebSocket" in window)) {
+    updateConnectionStatus("Offline");
+    elements.liveSummary.textContent =
+      "WebSocket is unavailable; using periodic REST refresh instead";
+    return;
+  }
+  socketStates = streamBatches.map(() => false);
+  streamBatches.forEach((_, index) => connectStreamBatch(index, generation));
 }
 
 async function scan(): Promise<void> {
@@ -589,11 +1311,27 @@ async function scan(): Promise<void> {
     );
 
     const requireEma = elements.ema.checked;
+    const previousPairs = new Map(
+      pairs.map((pair) => [pair.ticker.symbol, pair]),
+    );
     pairs = selected.map((ticker) => {
       const frames: PairAnalysis["frames"] = {};
+      const oneMinuteCandles =
+        candleData.get(ticker.symbol)?.["1m"] ?? [];
       for (const timeframe of TIMEFRAMES) {
         const candles = candleData.get(ticker.symbol)?.[timeframe];
-        if (candles) frames[timeframe] = calculateFrame(candles, requireEma);
+        if (candles) {
+          frames[timeframe] = calculateFrame(
+            candles,
+            requireEma,
+            timeframe,
+            oneMinuteCandles,
+            previousPairs.get(ticker.symbol)?.frames[timeframe],
+          );
+          const buffer = new CandleBuffer(CANDLES_TO_ANALYZE + 1);
+          buffer.seed(candles);
+          candleBuffers.set(bufferKey(ticker.symbol, timeframe), buffer);
+        }
       }
       const oneMinuteAtr = frames["1m"]?.atrPercent ?? null;
       return {
@@ -610,10 +1348,23 @@ async function scan(): Promise<void> {
         volatility: volatilityFor(oneMinuteAtr),
       };
     });
+    const analyzedSymbols = new Set(pairs.map((pair) => pair.ticker.symbol));
+    for (const key of activeSignals.keys()) {
+      if (!analyzedSymbols.has(key.slice(0, key.indexOf(":"))) ) {
+        activeSignals.delete(key);
+      }
+    }
     addNewSignals(pairs);
+    for (const pair of pairs) {
+      for (const timeframe of TIMEFRAMES) {
+        evaluateSignalState(pair, timeframe, false);
+      }
+    }
     elements.updated.textContent = new Date().toLocaleTimeString();
     setStatus(`Scan complete · ${new Date().toLocaleTimeString()}`);
     renderAll();
+    renderLiveSignals();
+    startWebSockets(selected.map((ticker) => ticker.symbol));
     if (storageWarning) {
       elements.error.textContent = storageWarning;
       elements.error.hidden = false;
@@ -642,7 +1393,42 @@ elements.sort.addEventListener("change", renderAll);
 elements.filter.addEventListener("change", renderAll);
 elements.payout.addEventListener("input", renderAll);
 elements.pairLimit.addEventListener("change", () => void scan());
-elements.ema.addEventListener("change", () => void scan());
+elements.ema.addEventListener("change", () => {
+  for (const [key, active] of activeSignals) {
+    if (active.state === "DEVELOPING") {
+      const record = currentSignalRecord(active.id);
+      if (record) storeSignal({ ...record, state: "CANCELLED" });
+    }
+    activeSignals.delete(key);
+  }
+  void scan();
+});
+elements.earlyWarning.addEventListener("change", () => void scan());
+elements.notifications.addEventListener("change", async () => {
+  if (!elements.notifications.checked) return;
+  if (!("Notification" in window)) {
+    elements.liveSummary.textContent = "Browser notifications are not supported here";
+    elements.notifications.checked = false;
+    return;
+  }
+  try {
+    notificationPermission = await Notification.requestPermission();
+  } catch (error) {
+    elements.notifications.checked = false;
+    elements.liveSummary.textContent =
+      error instanceof Error
+        ? `Could not request notification permission: ${error.message}`
+        : "Could not request notification permission";
+    return;
+  }
+  if (notificationPermission !== "granted") {
+    elements.notifications.checked = false;
+    elements.liveSummary.textContent =
+      "Browser notifications are off until permission is granted";
+  } else {
+    elements.liveSummary.textContent = "Browser notifications enabled";
+  }
+});
 elements.theme.addEventListener("click", () => {
   const light = document.documentElement.classList.toggle("light-theme");
   elements.theme.setAttribute(
@@ -654,4 +1440,12 @@ elements.theme.addEventListener("click", () => {
 renderFeed();
 renderAll();
 void scan();
+window.setInterval(() => {
+  if (socketStates.length === 0 || socketStates.every((connected) => !connected)) {
+    void scan();
+  }
+}, REST_FALLBACK_INTERVAL_MS);
 window.setInterval(() => void scan(), REFRESH_INTERVAL_MS);
+window.setInterval(() => {
+  renderLiveSignals();
+}, 1000);

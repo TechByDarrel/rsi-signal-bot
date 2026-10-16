@@ -10,9 +10,12 @@ import {
 
 export interface Candle {
   openTime: number;
+  closeTime: number;
+  open: number;
   high: number;
   low: number;
   close: number;
+  closed: boolean;
 }
 
 export interface Ticker24h {
@@ -157,9 +160,12 @@ async function requestCandles(
     }
     return {
       openTime: Number(row[0]),
+      closeTime: Number(row[6]),
+      open: Number(row[1]),
       high: Number(row[2]),
       low: Number(row[3]),
       close: Number(row[4]),
+      closed: Number(row[6]) < Date.now(),
     };
   });
 }

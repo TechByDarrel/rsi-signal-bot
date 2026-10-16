@@ -10,7 +10,14 @@ export type Timeframe = (typeof TIMEFRAMES)[number];
 export const CANDLES_TO_ANALYZE = 500;
 export const DEFAULT_PAIR_LIMIT = 30;
 export const DEFAULT_PAYOUT_PERCENT = 80;
+export const DEFAULT_EARLY_WARNING_MINUTES = 2;
 export const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+export const REST_FALLBACK_INTERVAL_MS = 60 * 1000;
+export const UI_UPDATE_INTERVAL_MS = 1000;
+export const WEBSOCKET_MAX_STREAMS = 200;
+export const WEBSOCKET_RECONNECT_BASE_MS = 1000;
+export const WEBSOCKET_RECONNECT_MAX_MS = 60_000;
+export const WEBSOCKET_ROTATE_MS = 23 * 60 * 60 * 1000;
 export const REQUESTS_PER_BATCH = 5;
 export const REQUEST_WEIGHT_PER_KLINE = 2;
 
@@ -28,4 +35,11 @@ export const TIMEFRAME_MILLISECONDS: Record<Timeframe, number> = {
   "5m": 5 * 60_000,
   "15m": 15 * 60_000,
   "1h": 60 * 60_000,
+};
+
+export const TIMEFRAME_INTERVALS: Record<Timeframe, string> = {
+  "1m": "1m",
+  "5m": "5m",
+  "15m": "15m",
+  "1h": "1h",
 };
